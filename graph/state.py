@@ -1,37 +1,40 @@
 """
 LangGraph State Definitions
 ----------------------------
-Типизированные состояния для каждого слоя графа.
-Это основа Goodhart-proof изоляции в LangGraph.
+Typed state definitions for each graph layer.
+This is the foundation of Goodhart-proof isolation in LangGraph.
 """
-from typing import TypedDict, Annotated, Literal
-from typing_extensions import NotRequired
-import operator
 
-from contracts import TaskInput, CodeArtifact, Verdict
+import operator
+from typing import Annotated, Literal, TypedDict
+
+from typing_extensions import NotRequired
+
+from contracts import CodeArtifact, TaskInput, Verdict
 
 
 class GraphState(TypedDict):
     """
-    Глобальное состояние графа.
-    Передаётся между узлами, сохраняется в checkpoint.
+    Global graph state.
+    Passed between nodes and persisted in checkpoints.
     """
+
     # Input
     user_spec_path: str
     feature_name: str
-    
+
     # Planning output
     task: NotRequired[TaskInput]
-    
+
     # Execution/Verification loop
-    iteration: Annotated[int, operator.add]  # Суммируется при каждом update
+    iteration: Annotated[int, operator.add]  # Accumulates on each update
     artifacts: Annotated[list[CodeArtifact], operator.add]  # Append-only
     verdicts: Annotated[list[Verdict], operator.add]  # Append-only
-    feedback: NotRequired[str]  # Abstract feedback для retry
-    
+    feedback: NotRequired[str]  # Abstract feedback for retries
+
     # Final result
     final_passed: NotRequired[bool]
     total_cost: NotRequired[float]
-    
+
     # Metadata
     thread_id: str

@@ -1,10 +1,10 @@
 """
 VERIFICATION LAYER — Blind Code Reviewer
 ----------------------------------------
-Получает ТОЛЬКО SealedArtifact (git diff + logs) + рубрику.
-НЕ видит: worker_id, task_description, original_prompt.
+Receives ONLY the sealed artifact (`git diff` + logs) and the rubric.
+It does NOT see `worker_id`, `task_description`, or `original_prompt`.
 
-Возвращает Verdict: pass/fail + score + reason.
+Returns a `Verdict`: pass/fail + score + reason.
 """
 
 import asyncio
@@ -26,14 +26,14 @@ from contracts import CodeArtifact, Verdict, VerificationRubric
 
 console = Console()
 
-# Используем Ollama локально
+# Use Ollama locally
 DEFAULT_OLLAMA_MODEL = os.getenv(
     "OLLAMA_VERIFIER_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5-coder:3b-instruct")
 )
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
 
-# ─── Рубрика (жёстко задана, НЕ передаётся воркеру!) ────────────────────────
+# ─── Rubric (hard-coded and NEVER passed to the worker) ─────────────────────
 DEFAULT_RUBRIC: VerificationRubric = {
     "criteria": [
         "Code correctness: implements the described functionality without bugs",
@@ -47,7 +47,7 @@ DEFAULT_RUBRIC: VerificationRubric = {
     "required_tests": [],
 }
 
-# ─── Системный промпт для верификатора ──────────────────────────────────────
+# ─── System prompt for the verifier ─────────────────────────────────────────
 SYSTEM_PROMPT = """You are an independent code reviewer. You receive:
 1. A git diff showing code changes (new files or modifications)
 2. A rubric with specific criteria to evaluate
@@ -77,7 +77,7 @@ Be strict. If code has bugs, missing type hints, or poor error handling — fail
 
 
 def _get_ollama_model() -> str:
-    """Возвращает название модели Ollama."""
+    """Return the Ollama model name."""
     return DEFAULT_OLLAMA_MODEL
 
 
@@ -95,11 +95,11 @@ def _write_reconstructed_file(
 
 def _apply_diff_to_workdir(workdir: Path, git_diff: str) -> list[str]:
     """
-    Применяет git diff к временной директории для запуска тестов.
+    Apply a git diff to a temporary directory for test execution.
 
-    Для MVP поддерживает реконструкцию файлов из unified diff, когда в патче
-    присутствует достаточно строк для сборки содержимого (например diff against
-    /dev/null, как в execution.py).
+    For the MVP, this supports reconstructing files from a unified diff when
+    the patch contains enough lines to rebuild the content, for example a diff
+    against `/dev/null` like the one produced in `execution.py`.
     """
     files: list[str] = []
     current_file: str | None = None
@@ -155,8 +155,8 @@ def _apply_diff_to_workdir(workdir: Path, git_diff: str) -> list[str]:
 
 def _run_tests(workdir: Path, files: list[str]) -> tuple[bool, int, int]:
     """
-    Запускает pytest в workdir если есть тесты.
-    Возвращает (passed, tests_passed, tests_total).
+    Run pytest in `workdir` if test files exist.
+    Returns `(passed, tests_passed, tests_total)`.
     """
     test_files = [
         f for f in files if f.startswith("tests/") or "test" in Path(f).name.lower()
@@ -203,15 +203,15 @@ async def verify(
     timeout_sec: int = 120,
 ) -> Verdict:
     """
-    Главная функция слоя VERIFICATION.
+    Main function of the VERIFICATION layer.
 
     Args:
-        artifact: CodeArtifact (ТОЛЬКО diff + logs, без worker_id!)
-        rubric: Критерии оценки (НЕ видны воркеру)
-        timeout_sec: Максимальное время на верификацию
+        artifact: `CodeArtifact` (ONLY diff + logs, without `worker_id`)
+        rubric: Evaluation criteria, not visible to the worker
+        timeout_sec: Maximum verification time in seconds
 
     Returns:
-        Verdict (pass/fail + score + reason)
+        `Verdict` (pass/fail + score + reason)
     """
     console.print(
         f"\n[bold magenta]═══ VERIFICATION: {artifact['artifact_id']} ═══[/]\n"
@@ -250,7 +250,7 @@ Review this code strictly according to the rubric. Output JSON as specified."""
 
     llm = ChatOpenAI(
         base_url=OLLAMA_BASE_URL,
-        api_key="ollama",  # Ollama не требует реальный API key
+        api_key=SecretStr("ollama"),  # Ollama does not require a real API key
         model=model_name,
         temperature=0.2,
         max_completion_tokens=1024,
@@ -320,13 +320,13 @@ Review this code strictly according to the rubric. Output JSON as specified."""
     return verdict
 
 
-# ─── Изолированный тест ─────────────────────────────────────────────────────
+# ─── Standalone test ────────────────────────────────────────────────────────
 if __name__ == "__main__":
     from dotenv import load_dotenv
 
     load_dotenv()
 
-    # Проверяем что Ollama доступна
+    # Check that Ollama is available
     import requests
 
     try:

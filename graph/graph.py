@@ -1,17 +1,17 @@
 """
 LangGraph StateGraph — Developer Farm Orchestrator
 ---------------------------------------------------
-Связывает Planning → Execution → Verification в единый граф с:
+Connects Planning → Execution → Verification into one graph with:
 - Conditional edges (retry loop)
 - Persistence (SQLite / memory)
 - Streaming (astream_events)
-- Time-travel debug
+- Time-travel debugging
 """
 
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
@@ -33,19 +33,19 @@ console = Console()
 
 def build_graph(checkpointer: Any) -> Any:
     """
-    Создаёт и компилирует LangGraph StateGraph.
+    Create and compile a LangGraph StateGraph.
 
     Args:
-        checkpointer: Экземпляр LangGraph checkpointer
+        checkpointer: LangGraph checkpointer instance
 
     Returns:
-        Compiled graph с checkpointer
+        Compiled graph with the provided checkpointer
     """
     builder = StateGraph(GraphState)
 
-    builder.add_node("planning", planning_node)
-    builder.add_node("execution", execution_node)
-    builder.add_node("verification", verification_node)
+    builder.add_node("planning", cast(Any, planning_node))
+    builder.add_node("execution", cast(Any, execution_node))
+    builder.add_node("verification", cast(Any, verification_node))
 
     builder.set_entry_point("planning")
     builder.add_edge("planning", "execution")
@@ -69,13 +69,13 @@ async def run_pipeline_with_langgraph(
     checkpoint_db: str = "./data/checkpoints.db",
 ) -> dict[str, Any]:
     """
-    Запуск пайплайна через LangGraph с persistence.
+    Run the pipeline through LangGraph with persistence.
 
     Args:
-        user_spec_path: Путь к user-spec.md
-        feature_name: Название фичи
-        thread_id: Уникальный ID для checkpointing (auto-generated если None)
-        checkpoint_db: Путь к SQLite для persistence
+        user_spec_path: Path to `user-spec.md`
+        feature_name: Feature name
+        thread_id: Unique checkpointing ID (auto-generated if `None`)
+        checkpoint_db: Path to the SQLite persistence database
     """
     if thread_id is None:
         thread_id = f"feature-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -93,6 +93,9 @@ async def run_pipeline_with_langgraph(
         "user_spec_path": user_spec_path,
         "feature_name": feature_name,
         "thread_id": thread_id,
+        "iteration": 0,
+        "artifacts": [],
+        "verdicts": [],
     }
     config: RunnableConfig = {
         "configurable": {

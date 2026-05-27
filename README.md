@@ -42,6 +42,12 @@ RETRY LOOP      →  Abstract Feedback (NO rubric revealed)
 | **Verification** | Git diff, rubric | **Worker ID, task description, author** |
 | **Optimization** | Aggregated metrics | Artifact contents, raw logs |
 
+## 📸 Live Demo
+
+![Developer Farm Dashboard](docs/assets/dashboard-screenshot.png)
+
+*Pipeline execution: Planning → Execution → Verification in 26 seconds*
+
 ## 🏗 Architecture
 
 ### Core Components

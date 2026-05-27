@@ -38,15 +38,19 @@ fi
 
 # ─── 3. Install Ollama (optimized for Pascal/4GB VRAM) ────────────────────
 echo "🦙 [3/7] Installing Ollama & configuring for Pascal/4GB..."
+
+# 1. Install Ollama (it starts automatically on default path)
 if ! command -v ollama &> /dev/null; then
     curl -fsSL https://ollama.com/install.sh | sh
 fi
 
-# Create directory for models on /dev/sda (not /home)
-sudo mkdir -p "$PROJECT_DIR/models/ollama"
-sudo chown -R "$USER:$USER" "$PROJECT_DIR/models"
+# 2. Stop the service immediately to prevent mixed permission files
+sudo systemctl stop ollama
 
-# Configure systemd override for memory limits and Flash Attention disable
+# 3. Create directory for models
+sudo mkdir -p "$PROJECT_DIR/models/ollama"
+
+# 4. Configure systemd override FIRST
 sudo mkdir -p /etc/systemd/system/ollama.service.d
 cat << EOF | sudo tee /etc/systemd/system/ollama.service.d/gpu.conf > /dev/null
 [Service]
@@ -57,10 +61,19 @@ Environment="OLLAMA_FLASH_ATTENTION=false"
 Environment="OLLAMA_MAX_LOADED_MODELS=1"
 EOF
 
+# 5. Fix permissions after paths are established
+sudo chown -R ollama:ollama "$PROJECT_DIR/models/ollama"
+sudo chmod -R 775 "$PROJECT_DIR/models/ollama"
+sudo usermod -a -G ollama "$USER"
+
+# 6. Reload daemon and FORCE a full restart of the service
 sudo systemctl daemon-reload
-sudo systemctl enable --now ollama
+sudo systemctl enable ollama
+sudo systemctl restart ollama
+
 sleep 5
 echo "   ✅ Ollama configured & running"
+echo "   ⚠️  Log out and back in for group changes to take effect"
 
 # ─── 4. Python Virtual Environment ────────────────────────────────────────
 echo "🐍 [4/7] Setting up Python 3.11 venv..."
@@ -71,9 +84,9 @@ pip install --upgrade pip setuptools wheel -q
 
 echo "   📚 Installing Python packages..."
 pip install -q \
-    aiohttp aiohttp-sse-client \
+    aiohttp aiohttp_sse aiohttp-sse-client \
     langgraph langchain-core langchain-openai langchain-community \
-    pydantic redis httpx rich tenacity python-dotenv
+    pydantic redis httpx rich tenacity python-dotenv neo4j ast-grep-py tree-sitter tree-sitter-python
 
 echo "   ✅ Python environment ready"
 

@@ -1,87 +1,89 @@
 """
 Goodhart-Proof Contracts for Developer Farm MVP
 -----------------------------------------------
-Эти TypedDict определяют ЖЁСТКИЕ границы между слоями.
-Если поля нет в TypedDict — оно физически не может быть передано.
+These `TypedDict` definitions enforce HARD boundaries between layers.
+If a field is not declared in a `TypedDict`, it cannot be passed across the boundary.
 
-Принцип: важно не то, что слой делает, а чего он НЕ видит.
+Principle: what matters is not only what a layer does, but also what it must NOT see.
 """
 
-from typing import Literal, TypedDict
+from typing import TypedDict, TypeVar, cast
+
+from typing_extensions import NotRequired
 
 # ═══════════════════════════════════════════════════════════════════
-# СЛОЙ PLANNING → EXECUTION
+# LAYER PLANNING → EXECUTION
 # ═══════════════════════════════════════════════════════════════════
 
 
 class TaskInput(TypedDict):
     """
-    Что получает воркер от Planning.
-    ⛔ ЗАПРЕЩЕНО добавлять: acceptance_criteria, tests, rubric, worker_id
+    What the worker receives from Planning.
+    ⛔ FORBIDDEN to add: `acceptance_criteria`, `tests`, `rubric`, `worker_id`
     """
 
     task_id: str  # "task-001"
-    description: str  # Что нужно сделать (технически)
-    context_files: list[str]  # Пути к файлам для чтения
+    description: str  # What must be implemented, technically
+    context_files: list[str]  # File paths to read for context
     language: str  # "python", "php", "typescript"
-    target_path: str  # Куда писать результат
-    # ❌ acceptance_criteria: str      ← НЕЛЬЗЯ
-    # ❌ test_cases: list[dict]        ← НЕЛЬЗЯ
-    # ❌ rubric: dict                  ← НЕЛЬЗЯ
+    target_path: str  # Where to write the result
+    # ❌ acceptance_criteria: str      ← FORBIDDEN
+    # ❌ test_cases: list[dict]        ← FORBIDDEN
+    # ❌ rubric: dict                  ← FORBIDDEN
 
 
 # ═══════════════════════════════════════════════════════════════════
-# СЛОЙ EXECUTION → VERIFICATION
+# LAYER EXECUTION → VERIFICATION
 # ═══════════════════════════════════════════════════════════════════
 
 
 class CodeArtifact(TypedDict):
     """
-    Запечатанный артефакт от воркера.
-    ⛔ ЗАПРЕЩЕНО добавлять: worker_id, task_description, original_prompt
+    Sealed artifact produced by the worker.
+    ⛔ FORBIDDEN to add: `worker_id`, `task_description`, `original_prompt`
     """
 
     artifact_id: str  # UUID
-    task_id: str  # Ссылка на задачу (для трассировки)
-    files_changed: list[str]  # Список изменённых файлов
-    git_diff: str  # Патч в формате unified diff
-    logs: str  # Логи процесса генерации
-    worktree_path: NotRequired[str]  # ← НОВОЕ
-    branch_name: NotRequired[str]  # ← НОВОЕ
-    # ❌ worker_id: str                ← НЕЛЬЗЯ (верификатор не должен знать автора)
-    # ❌ task_description: str         ← НЕЛЬЗЯ (оценка только по коду)
-    # ❌ prompt_sent: str              ← НЕЛЬЗЯ
+    task_id: str  # Reference to the task, for traceability
+    files_changed: list[str]  # List of modified files
+    git_diff: str  # Patch in unified diff format
+    logs: str  # Generation process logs
+    worktree_path: NotRequired[str]  # New
+    branch_name: NotRequired[str]  # New
+    # ❌ worker_id: str                ← FORBIDDEN (the verifier must not know the author)
+    # ❌ task_description: str         ← FORBIDDEN (evaluation must be code-only)
+    # ❌ prompt_sent: str              ← FORBIDDEN
 
 
 # ═══════════════════════════════════════════════════════════════════
-# СЛОЙ VERIFICATION → OPTIMIZATION / ЧЕЛОВЕК
+# LAYER VERIFICATION → OPTIMIZATION / HUMAN
 # ═══════════════════════════════════════════════════════════════════
 
 
 class Verdict(TypedDict):
     """
-    Результат слепой верификации.
+    Result of blind verification.
     """
 
     artifact_id: str
     task_id: str
     passed: bool
     score: float  # 0.0 - 1.0
-    reason: str  # Почему pass/fail
-    rubric_applied: dict  # По каким критериям оценивали
+    reason: str  # Why it passed or failed
+    rubric_applied: dict  # Which evaluation criteria were applied
     tests_passed: int
     tests_total: int
-    # ❌ worker_id: str                ← НЕЛЬЗЯ
-    # ❌ task_description: str         ← НЕЛЬЗЯ
+    # ❌ worker_id: str                ← FORBIDDEN
+    # ❌ task_description: str         ← FORBIDDEN
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ВСПОМОГАТЕЛЬНЫЕ
+# SUPPORTING TYPES
 # ═══════════════════════════════════════════════════════════════════
 
 
 class UserSpec(TypedDict):
-    """Вход для Planning (что пишет человек)"""
+    """Input for Planning, written by a human."""
 
     feature_name: str
     description: str
@@ -90,7 +92,7 @@ class UserSpec(TypedDict):
 
 
 class VerificationRubric(TypedDict):
-    """Рубрика для Verifier (НЕ видна воркеру!)"""
+    """Rubric for the verifier, not visible to the worker."""
 
     criteria: list[str]
     min_score: float
@@ -98,7 +100,7 @@ class VerificationRubric(TypedDict):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ВАЛИДАТОР ГРАНИЦ (вызывается при передаче между слоями)
+# BOUNDARY VALIDATOR (called on every layer transition)
 # ═══════════════════════════════════════════════════════════════════
 
 FORBIDDEN_IN_TASK_INPUT = {"acceptance_criteria", "test_cases", "rubric", "worker_id"}
@@ -110,10 +112,13 @@ FORBIDDEN_IN_ARTIFACT = {
 }
 
 
-def validate_boundary(data: dict, allowed_type: type, forbidden: set) -> dict:
+T = TypeVar("T")
+
+
+def validate_boundary(data: dict, allowed_type: type[T], forbidden: set) -> T:
     """
-    Проверяет, что в данных нет запрещённых полей.
-    Вызывается на каждом переходе между слоями.
+    Verify that the data does not contain forbidden fields.
+    Called on every transition between layers.
     """
     extra_keys = set(data.keys()) - set(allowed_type.__annotations__.keys())
     forbidden_present = extra_keys & forbidden
@@ -124,20 +129,21 @@ def validate_boundary(data: dict, allowed_type: type, forbidden: set) -> dict:
             f"This breaks layer isolation!"
         )
 
-    # Возвращаем ТОЛЬКО разрешённые поля (остальное отбрасываем)
-    return {k: v for k, v in data.items() if k in allowed_type.__annotations__}
+    # Return ONLY allowed fields and discard everything else
+    filtered = {k: v for k, v in data.items() if k in allowed_type.__annotations__}
+    return cast(T, filtered)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# УТИЛИТЫ ДЛЯ СЛОЁВ
+# LAYER UTILITIES
 # ═══════════════════════════════════════════════════════════════════
 
 
 def seal_task_for_execution(task: dict) -> TaskInput:
-    """Planning → Execution: обрезаем всё лишнее"""
+    """Planning → Execution: strip everything except allowed fields."""
     return validate_boundary(task, TaskInput, FORBIDDEN_IN_TASK_INPUT)
 
 
 def seal_artifact_for_verification(artifact: dict) -> CodeArtifact:
-    """Execution → Verification: скрываем автора и контекст"""
+    """Execution → Verification: hide author-related and extra context fields."""
     return validate_boundary(artifact, CodeArtifact, FORBIDDEN_IN_ARTIFACT)

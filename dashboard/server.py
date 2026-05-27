@@ -1,13 +1,13 @@
 """
 Developer Farm Dashboard Server
 --------------------------------
-aiohttp SSE-сервер, транслирующий LangGraph события в формат дашборда.
+aiohttp SSE server that translates LangGraph events into dashboard events.
 
 Endpoints:
-- GET  /api/events?thread_id=X     — SSE stream событий
-- POST /api/start                  — запуск нового пайплайна
+- GET  /api/events?thread_id=X     — SSE event stream
+- POST /api/start                  — start a new pipeline
 - POST /api/approve                — human-in-the-loop approval
-- GET  /                           — статика дашборда
+- GET  /                           — dashboard static assets
 """
 
 import asyncio
@@ -23,14 +23,14 @@ from dotenv import load_dotenv
 from langgraph.checkpoint.memory import InMemorySaver
 from rich.console import Console
 
-from graph.reconciler import get_reconciler
 from graph.graph import AsyncSqliteSaver, build_graph
+from graph.reconciler import get_reconciler
 
 load_dotenv()
 console = Console()
 
-# ─── Глобальное состояние (для MVP достаточно in-memory) ────────────────────
-# В продакшене: Redis или SQLite
+# ─── Global state (in-memory is enough for MVP) ─────────────────────────────
+# In production: Redis or SQLite
 active_threads: dict[str, dict] = {}  # thread_id → {status, state, ...}
 event_queues: dict[str, asyncio.Queue] = {}  # thread_id → Queue of events
 
@@ -41,9 +41,9 @@ def get_or_create_queue(thread_id: str) -> asyncio.Queue:
     return event_queues[thread_id]
 
 
-# ─── Маппинг LangGraph events → Dashboard events ────────────────────────────
+# ─── LangGraph events → Dashboard events mapping ────────────────────────────
 def map_lg_event(lg_event: dict, thread_id: str) -> dict | None:
-    """Превращает сырое LangGraph событие в формат дашборда."""
+    """Convert a raw LangGraph event into dashboard event format."""
     kind = lg_event.get("event")
     name = lg_event.get("name", "")
     ts = int(time.time() * 1000)
@@ -91,7 +91,7 @@ def map_lg_event(lg_event: dict, thread_id: str) -> dict | None:
         output = lg_event.get("data", {}).get("output", {})
         msg = f"{name.capitalize()} complete"
 
-        # Извлекаем полезную информацию из output узла
+        # Extract useful information from the node output
         if name == "planning":
             task = output.get("task", {})
             msg = (
@@ -99,7 +99,12 @@ def map_lg_event(lg_event: dict, thread_id: str) -> dict | None:
             )
         elif name == "execution":
             artifacts = output.get("artifacts", [])
-            msg = f"Generated {len(artifacts)} artifact(s)"
+            if artifacts:
+                branch = artifacts[-1].get("branch_name", "unknown")
+                msg = f"Generated {len(artifacts)} in branch: {branch}"
+            else:
+                msg = f"Generated {len(artifacts)} artifact(s)"
+
         elif name == "verification":
             verdicts = output.get("verdicts", [])
             if verdicts:
@@ -128,16 +133,16 @@ def map_lg_event(lg_event: dict, thread_id: str) -> dict | None:
     return None
 
 
-# ─── Запуск графа в фоне с трансляцией событий ──────────────────────────────
+# ─── Run the graph in the background and stream events ──────────────────────
 async def run_graph_with_streaming(
     thread_id: str,
     user_spec_path: str,
     feature_name: str = "default",
 ):
-    """Запускает LangGraph и стримит события в очередь дашборда."""
+    """Run LangGraph and stream events into the dashboard queue."""
     reconciler = get_reconciler()
     reconciler.register_thread(thread_id, {"feature": feature_name})
-    
+
     queue = get_or_create_queue(thread_id)
     checkpoint_db = "./data/checkpoints.db"
 
@@ -158,9 +163,9 @@ async def run_graph_with_streaming(
         async for event in graph.astream_events(
             initial_state, config=config, version="v2"
         ):
-            # Обновляем heartbeat при каждом событии
+            # Update heartbeat on every event
             reconciler.update_heartbeat(thread_id)
-            
+
             dashboard_event = map_lg_event(event, thread_id)
             if dashboard_event:
                 dashboard_event["thread_id"] = thread_id
@@ -206,28 +211,26 @@ async def run_graph_with_streaming(
 
 # ─── HTTP Endpoints ──────────────────────────────────────────────────────────
 async def handle_index(request: web.Request) -> web.StreamResponse:
-    """GET / — simple dashboard page."""
-    index_path = Path(__file__).parent / "static" / "index.html"
+    """GET / — dashboard page (React or simple HTML)."""
+    # Use the React version by default. Use ?react=false for the legacy page.
+    use_react = request.query.get("react", "true").lower() == "true"
+
+    if use_react:
+        index_path = Path(__file__).parent / "static" / "index-react.html"
+    else:
+        index_path = Path(__file__).parent / "static" / "index.html"
+
     if not index_path.exists():
-        raise web.HTTPNotFound(text="Dashboard index not found")
+        raise web.HTTPNotFound(text=f"Dashboard not found: {index_path.name}")
     return web.FileResponse(index_path)
 
 
 async def handle_sse(request: web.Request) -> web.StreamResponse:
-    """SSE endpoint для дашборда. Транслирует события из очереди."""
+    """SSE endpoint for the dashboard. Streams events from the queue."""
     thread_id = request.query.get("thread_id", "all")
 
     async with sse_response(request) as resp:
-        if thread_id == "all":
-            # Подписка на все активные threads
-            queues = [get_or_create_queue(tid) for tid in active_threads]
-            if not queues:
-                # Нет активных — создаём demo queue
-                queues = [get_or_create_queue("demo")]
-        else:
-            queues = [get_or_create_queue(thread_id)]
-
-        # Heartbeat каждые 15 сек чтобы соединение не рвалось
+        # Heartbeat every 15 seconds to keep the connection alive
         async def heartbeat():
             while True:
                 await asyncio.sleep(15)
@@ -240,7 +243,20 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
 
         try:
             while True:
-                # Читаем из всех очередей с timeout
+                # Resolve queues dynamically on each iteration
+                if thread_id == "all":
+                    # Subscribe to all active threads
+                    queues = [
+                        get_or_create_queue(tid) for tid in list(active_threads.keys())
+                    ]
+                    if not queues:
+                        # No active threads yet — just wait
+                        await asyncio.sleep(0.5)
+                        continue
+                else:
+                    queues = [get_or_create_queue(thread_id)]
+
+                # Read from all queues with a timeout
                 for queue in queues:
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=0.1)
@@ -256,7 +272,7 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_start(request: web.Request) -> web.Response:
-    """POST /api/start — запуск нового пайплайна."""
+    """POST /api/start — start a new pipeline."""
     data = await request.json()
     user_spec = data.get("user_spec", "work/mvp/user-spec.md")
     feature_name = data.get("feature_name", "default")
@@ -265,7 +281,7 @@ async def handle_start(request: web.Request) -> web.Response:
     if not Path(user_spec).exists():
         return web.json_response({"error": f"Spec not found: {user_spec}"}, status=400)
 
-    # Запускаем граф в фоне
+    # Run the graph in the background
     asyncio.create_task(run_graph_with_streaming(thread_id, user_spec, feature_name))
 
     return web.json_response(
@@ -278,14 +294,14 @@ async def handle_start(request: web.Request) -> web.Response:
 
 
 async def handle_approve(request: web.Request) -> web.Response:
-    """POST /api/approve — human-in-the-loop (для будущей OPTIMIZATION layer)."""
+    """POST /api/approve — human-in-the-loop hook for a future optimization layer."""
     data = await request.json()
     thread_id = data.get("thread_id")
 
     if not thread_id or thread_id not in active_threads:
         return web.json_response({"error": "Unknown thread"}, status=404)
 
-    # В MVP это просто логирование. В полной версии: graph.aupdate_state()
+    # In MVP this is just logging. A full version would call graph.aupdate_state().
     console.print(f"[bold green]✅ APPROVED by human: {thread_id}[/]")
 
     queue = get_or_create_queue(thread_id)
@@ -302,7 +318,7 @@ async def handle_approve(request: web.Request) -> web.Response:
 
 
 async def handle_status(request: web.Request) -> web.Response:
-    """GET /api/status — список активных threads."""
+    """GET /api/status — list active threads."""
     return web.json_response(
         {
             "threads": {
@@ -312,6 +328,34 @@ async def handle_status(request: web.Request) -> web.Response:
                 }
                 for tid, info in active_threads.items()
             }
+        }
+    )
+
+
+async def handle_system_info(request: web.Request) -> web.Response:
+    """GET /api/system — system information."""
+    import os
+    import platform
+
+    # Read OS information
+    try:
+        with open("/etc/os-release") as f:
+            os_info = {}
+            for line in f:
+                if "=" in line:
+                    key, val = line.strip().split("=", 1)
+                    os_info[key] = val.strip('"')
+        os_name = os_info.get("PRETTY_NAME", platform.system())
+    except Exception:
+        os_name = platform.system()
+
+    # CPU count
+    cpu_count = os.cpu_count() or 1
+
+    return web.json_response(
+        {
+            "os": os_name,
+            "vcpu": cpu_count,
         }
     )
 
@@ -327,8 +371,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/start", handle_start)
     app.router.add_post("/api/approve", handle_approve)
     app.router.add_get("/api/status", handle_status)
+    app.router.add_get("/api/system", handle_system_info)
 
-    # Статика дашборда (если будете хостить через тот же сервер)
+    # Dashboard static assets (when served from the same server)
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
         app.router.add_static("/static/", static_dir, name="static")

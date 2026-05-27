@@ -1,5 +1,30 @@
+# Python
 __pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
 venv/
+.venv/
+
+# Local environment
+.env
+.env.local
+*.log
+
+# Project data (не коммитим артефакты работы)
+data/
 worktrees/
-*.db
+work/**/results/
 .cache/
+models/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# OS
+Thumbs.db

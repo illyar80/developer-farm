@@ -1,35 +1,38 @@
 """
 EXECUTION LAYER — Goodhart-Proof Code Generator
 -----------------------------------------------
-Получает ТОЛЬКО описание задачи и контекстные файлы.
-НЕ получает: acceptance_criteria, tests, rubric, worker_id.
+Receives ONLY the task description and context files.
+It does NOT receive `acceptance_criteria`, tests, rubric, or `worker_id`.
 
-Возвращает SealedArtifact (git diff + logs) без worker_id.
+Returns a sealed artifact (`git diff` + logs) without `worker_id`.
 """
 
 import asyncio
 import os
 import re
-import subprocess
 import sys
-import tempfile
 import uuid
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 from rich.console import Console
 
-FORCE_BAD_CODE = os.getenv("FORCE_BAD_CODE", "false").lower() == "true"
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from contracts import CodeArtifact, TaskInput, seal_artifact_for_verification
+from utils.git_worktree import (
+    apply_diff_to_worktree,
+    cleanup_worktree,
+    commit_worktree,
+    create_worktree,
+    get_diff_from_main,
+)
 
 console = Console()
 
-# ─── Промпты (без упоминания тестов или критериев!) ─────────────────────────
+# ─── Prompts (with no mention of tests or evaluation criteria) ─────────────
 SYSTEM_PROMPT = """You are a precise code generator. You receive:
 1. A task description (what needs to be implemented)
 2. Context files from the codebase (for style/structure reference)
@@ -53,8 +56,8 @@ Do NOT write tests. Do NOT write explanations outside code blocks."""
 
 def _build_user_prompt(task: TaskInput, context_contents: dict[str, str]) -> str:
     """
-    Формирует промпт для воркера.
-    ⛔ Здесь НЕТ ни слова о тестах, критериях, рубриках.
+    Build the worker prompt.
+    ⛔ It must not mention tests, evaluation criteria, or rubric.
     """
     parts = [f"# Task\n{task['description']}\n"]
     parts.append(f"# Language\n{task['language']}\n")
@@ -69,7 +72,7 @@ def _build_user_prompt(task: TaskInput, context_contents: dict[str, str]) -> str
 
 
 def _read_context_files(files: list[str]) -> dict[str, str]:
-    """Читает файлы контекста, игнорируя отсутствующие."""
+    """Read context files and ignore missing ones."""
     contents: dict[str, str] = {}
     for path in files:
         p = Path(path)
@@ -85,10 +88,10 @@ def _read_context_files(files: list[str]) -> dict[str, str]:
 
 def _sanitize_generated_path(candidate_path: str, fallback_path: str) -> str:
     """
-    Нормализует путь, полученный от LLM.
+    Normalize a path returned by the LLM.
 
-    Если модель вернула комментарий, абсолютный путь, traversal или слишком
-    длинное имя файла, используем fallback_path вместо сырого значения.
+    If the model returns a comment, an absolute path, a traversal path,
+    or an excessively long file name, use `fallback_path` instead.
     """
     candidate = candidate_path.strip().strip("`'\"")
     candidate = candidate.replace("\\", "/")
@@ -109,7 +112,7 @@ def _sanitize_generated_path(candidate_path: str, fallback_path: str) -> str:
 
 
 def _extract_text_content(content: Any) -> str:
-    """Нормализует content из ответа LangChain/OpenAI-подобных клиентов в строку."""
+    """Normalize response content from LangChain/OpenAI-like clients into a string."""
     if isinstance(content, str):
         return content
 
@@ -131,17 +134,17 @@ def _parse_code_blocks(
     response: str, fallback_path: str = "generated.py"
 ) -> dict[str, str]:
     """
-    Извлекает файлы из ответа LLM. Покрывает 6 форматов:
-    1. ```python:path/to/file.py      (идеальный)
-    2. # path/to/file.py перед блоком (Qwen с комментариями)
-    3. // path/to/file.py перед блоком (JS/TS)
-    4. path/to/file.py перед блоком БЕЗ комментария (Qwen без #)  ← НОВЫЙ
-    5. Просто ```python (fallback на target_path)
-    6. Множественные блоки
+    Extract files from the LLM response. Supports 6 formats:
+    1. ```python:path/to/file.py      (ideal)
+    2. # path/to/file.py before the block (Qwen with comments)
+    3. // path/to/file.py before the block (JS/TS)
+    4. path/to/file.py before the block WITHOUT a comment (Qwen without #)
+    5. Plain ```python (fallback to `target_path`)
+    6. Multiple code blocks
     """
     files: dict[str, str] = {}
 
-    # Формат 1: ```lang:path
+    # Format 1: ```lang:path
     pattern1 = r"```(\w+):([^\n`]+\.\w+)\n(.*?)```"
     for _, path, code in re.findall(pattern1, response, re.DOTALL):
         safe_path = _sanitize_generated_path(path, fallback_path)
@@ -149,7 +152,7 @@ def _parse_code_blocks(
     if files:
         return files
 
-    # Формат 2 и 3: # или // перед блоком
+    # Formats 2 and 3: # or // before the block
     pattern2 = r"(?:^|\n)(?:#|//)\s*([^\n`]+\.\w+)\s*\n```(\w+)\n(.*?)```"
     for path, _, code in re.findall(pattern2, response, re.DOTALL):
         safe_path = _sanitize_generated_path(path, fallback_path)
@@ -157,7 +160,7 @@ def _parse_code_blocks(
     if files:
         return files
 
-    # Формат 4: путь БЕЗ комментария перед ```
+    # Format 4: a path WITHOUT a comment before ```
     pattern3 = r"(?:^|\n)\s*([A-Za-z0-9_./\\-]+\.\w{1,5})\s*\n```(\w+)\n(.*?)```"
     for path, _, code in re.findall(pattern3, response, re.DOTALL):
         if "/" in path or path.count(".") >= 1:
@@ -166,7 +169,7 @@ def _parse_code_blocks(
     if files:
         return files
 
-    # Формат 5: один блок без пути — используем fallback
+    # Format 5: one block without a path — use the fallback
     pattern4 = r"```(\w+)\n(.*?)```"
     matches = re.findall(pattern4, response, re.DOTALL)
 
@@ -189,19 +192,19 @@ def _parse_code_blocks(
 
 def _strip_path_echo(code: str, filepath: str) -> str:
     """
-    Защитный слой: если LLM эхом продублировала путь в первой строке кода —
-    вырезаем её. Это частый баг Qwen при формате "path\n```code```".
+    Safety layer: if the LLM echoes the file path as the first code line,
+    remove it. This is a common Qwen bug with the `path\n```code```` format.
     """
     lines = code.split("\n")
     if not lines:
         return code
 
     first_line = lines[0].strip()
-    # Если первая строка == путь или его basename — удаляем
+    # Remove the first line if it is the full path or its basename
     if first_line == filepath or first_line == filepath.split("/")[-1]:
         return "\n".join(lines[1:]).lstrip("\n")
 
-    # Если первая строка содержит ".py"/".js"/etc и НЕ содержит операторов — вероятно мусор
+    # If the first line ends with a file extension and contains no operators, it is likely noise
     if any(
         first_line.endswith(ext) for ext in (".py", ".js", ".ts", ".php", ".rb", ".go")
     ):
@@ -216,13 +219,13 @@ def _strip_path_echo(code: str, filepath: str) -> str:
 
 def _make_git_diff(workdir: Path, files: dict[str, str]) -> str:
     """
-    Создаёт unified diff используя git worktree.
-    Заменяет старую версию с /tmp.
+    Create a unified diff using a git worktree.
+    Replaces the old `/tmp`-based implementation.
     """
-    # Применяем файлы в worktree
+    # Apply files to the worktree
     apply_diff_to_worktree(workdir, files)
 
-    # Получаем diff от main
+    # Get the diff from the main branch
     return get_diff_from_main(workdir)
 
 
@@ -230,7 +233,7 @@ async def execute(
     task: TaskInput, workdir: Optional[Path] = None, timeout_sec: int = 300
 ) -> CodeArtifact:
     """
-    Главная функция слоя EXECUTION с git worktrees.
+    Main function of the EXECUTION layer using git worktrees.
     """
     artifact_id = str(uuid.uuid4())[:8]
     logs = []
@@ -239,12 +242,12 @@ async def execute(
         logs.append(msg)
         console.print(f"[cyan][{artifact_id}][/cyan] {msg}")
 
-    # 1. Создаём git worktree вместо tempdir
+    # 1. Create a git worktree instead of a temp directory
     log(f"creating git worktree for {task['task_id']}")
     worktree_path = create_worktree(task["task_id"], artifact_id)
     log(f"worktree: {worktree_path}")
 
-    # 2. Чтение контекстных файлов (теперь из worktree)
+    # 2. Read context files from the worktree
     log(f"reading {len(task['context_files'])} context files")
     context_contents = {}
     for path in task["context_files"]:
@@ -252,19 +255,19 @@ async def execute(
         if p.exists():
             context_contents[path] = p.read_text()
 
-    # 3. Формирование промпта
+    # 3. Build the prompt
     user_prompt = _build_user_prompt(task, context_contents)
     log(f"prompt length: {len(user_prompt)} chars")
 
-    # 4. Вызов Ollama
+    # 4. Call Ollama
     log("calling Ollama (qwen2.5-coder:3b-instruct)")
     llm = ChatOpenAI(
         base_url=os.getenv("OPENAI_API_BASE", "http://localhost:11434/v1"),
-        api_key=os.getenv("OPENAI_API_KEY", "ollama"),
+        api_key=SecretStr(os.getenv("OPENAI_API_KEY", "ollama")),
         model=os.getenv("MODEL_NAME", "qwen2.5-coder:3b-instruct"),
         temperature=0.2,
-        max_tokens=2048,
-        request_timeout=timeout_sec,
+        max_completion_tokens=2048,
+        timeout=timeout_sec,
     )
 
     try:
@@ -272,14 +275,14 @@ async def execute(
             llm.invoke,
             [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_prompt)],
         )
-        generated_text = response.content
+        generated_text = _extract_text_content(response.content)
         log(f"generated {len(generated_text)} chars")
     except Exception as e:
         log(f"❌ Ollama call failed: {e}")
         cleanup_worktree(worktree_path, delete_branch=True)
         raise
 
-    # 5. Парсинг файлов
+    # 5. Parse files
     files = _parse_code_blocks(generated_text, fallback_path=task["target_path"])
     log(f"parsed {len(files)} files: {list(files.keys())}")
 
@@ -288,26 +291,26 @@ async def execute(
         cleanup_worktree(worktree_path, delete_branch=True)
         raise ValueError("LLM response contained no valid code blocks")
 
-    # 6. Применяем файлы в worktree и получаем diff
+    # 6. Apply files in the worktree and generate the diff
     git_diff = _make_git_diff(worktree_path, files)
     log(f"diff size: {len(git_diff)} chars")
 
-    # 7. Commit изменений в worktree
+    # 7. Commit changes in the worktree
     commit_message = f"feat({task['task_id']}): {task['description'][:50]}"
     committed = commit_worktree(worktree_path, commit_message)
 
     if not committed:
         log("⚠ No changes to commit")
 
-    # 8. Формирование артефакта
+    # 8. Build the artifact
     raw_artifact = {
         "artifact_id": artifact_id,
         "task_id": task["task_id"],
         "files_changed": list(files.keys()),
         "git_diff": git_diff,
         "logs": "\n".join(logs),
-        "worktree_path": str(worktree_path),  # ← НОВОЕ: сохраняем путь
-        "branch_name": f"agent/{task['task_id']}-{artifact_id}",  # ← НОВОЕ: имя branch
+        "worktree_path": str(worktree_path),  # New: persist the worktree path
+        "branch_name": f"agent/{task['task_id']}-{artifact_id}",  # New: branch name
     }
 
     sealed = seal_artifact_for_verification(raw_artifact)
@@ -316,17 +319,17 @@ async def execute(
     return sealed
 
 
-# ─── Изолированный тест ─────────────────────────────────────────────────────
+# ─── Standalone test ────────────────────────────────────────────────────────
 if __name__ == "__main__":
     """
-    Запуск: python -m nodes.execution
-    Тестирует execution.py изолированно, БЕЗ planning.py.
+    Run with: `python -m nodes.execution`
+    Tests `execution.py` in isolation, WITHOUT `planning.py`.
     """
     from dotenv import load_dotenv
 
     load_dotenv()
 
-    # Тестовая задача — имитируем вход от Planning
+    # Test task — simulate input from Planning
     test_task: TaskInput = {
         "task_id": "test-001",
         "description": (
@@ -334,10 +337,10 @@ if __name__ == "__main__":
             "that checks if a string reads the same forwards and backwards. "
             "Handle case insensitivity and ignore spaces."
         ),
-        "context_files": [],  # Нет контекста для изолированного теста
+        "context_files": [],  # No context for the standalone test
         "language": "python",
         "target_path": "src/utils/palindrome.py",
-        # ❌ НЕТ acceptance_criteria, test_cases, rubric
+        # ❌ No acceptance_criteria, test_cases, or rubric
     }
 
     console.print("\n[bold magenta]═══ EXECUTION NODE TEST ═══[/]\n")
@@ -350,7 +353,7 @@ if __name__ == "__main__":
         console.print(f"files: {result['files_changed']}")
         console.print(f"diff preview:\n{result['git_diff'][:500]}")
 
-        # Проверяем, что запрещённые поля действительно отсутствуют
+        # Verify that forbidden fields are truly absent
         forbidden = {"worker_id", "task_description", "original_prompt"}
         leaked = forbidden & set(result.keys())
         if leaked:
