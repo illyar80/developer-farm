@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from contracts import TaskInput, seal_task_for_execution
 
-# Optional Neo4j import with graceful degradation
+from utils.brightdata_scraper import _extract_libraries, scrape_library_docs
 try:
     from utils.code_graph import CodeGraph
     NEO4J_AVAILABLE = True
@@ -254,8 +254,28 @@ async def plan(
     
     # ─── Neo4j: Analyze code dependencies ────────────────────────────
     neo4j_context = _get_neo4j_context(target_path_hint, project_root=".")
-    
-    # ─── Build the prompt for Qwen-Max ───────────────────────────────
+
+    # ─── Bright Data: fallback для неизвестных библиотек ────────────────
+    use_brightdata = os.getenv("USE_BRIGHTDATA", "true").lower() == "true"
+    external_docs = ""
+
+    if use_brightdata:
+        analysis_text = user_spec + "\n" + "\n".join(neo4j_context)
+        libs = _extract_libraries(analysis_text)
+
+        if libs:
+            console.print(f"[cyan]📦 Detected {len(libs)} libraries. Checking Bright Data fallback...[/]")
+            doc_chunks = []
+            for lib in libs[:3]:
+                doc_text = scrape_library_docs(lib)
+                if doc_text:
+                    doc_chunks.append(f"## {lib} Reference Documentation\n{doc_text}")
+
+            external_docs = "\n\n".join(doc_chunks)
+            if external_docs:
+                console.print(f"[green]✅ Injected {len(external_docs)} chars of external docs[/]")
+
+    # ─── Формирование финального промпта ───────────────────────────────
     context_info = ""
     if neo4j_context:
         context_info = (
@@ -263,9 +283,22 @@ async def plan(
             + "\n".join(f"- {f}" for f in neo4j_context)
             + "\n\nPrefer these files when selecting context_files for the task."
         )
-    
-    full_system_prompt = SYSTEM_PROMPT + context_info
-    
+
+    system_prompt = f"""You are a technical planning agent. Analyze the user specification and generate a single atomic task.
+
+Output MUST be a JSON object with:
+- task_id: string (format: "task-XXX")
+- description: string (technical description, NO acceptance criteria)
+- context_files: list of strings
+- language: string
+- target_path: string
+
+{context_info}
+{external_docs}
+
+CRITICAL: Do NOT include acceptance criteria, tests, or rubric in the description.
+Output ONLY the JSON object."""
+
     # ─── Initialize the LLM client ───────────────────────────────────
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -290,7 +323,7 @@ async def plan(
         response = await asyncio.to_thread(
             llm.invoke,
             [
-                SystemMessage(content=full_system_prompt),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=f"User Specification:\n\n{user_spec}"),
             ],
         )
