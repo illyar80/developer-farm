@@ -217,18 +217,6 @@ def _strip_path_echo(code: str, filepath: str) -> str:
     return code
 
 
-def _make_git_diff(workdir: Path, files: dict[str, str]) -> str:
-    """
-    Create a unified diff using a git worktree.
-    Replaces the old `/tmp`-based implementation.
-    """
-    # Apply files to the worktree
-    apply_diff_to_worktree(workdir, files)
-
-    # Get the diff from the main branch
-    return get_diff_from_main(workdir)
-
-
 async def execute(
     task: TaskInput, workdir: Optional[Path] = None, timeout_sec: int = 300
 ) -> CodeArtifact:
@@ -291,9 +279,8 @@ async def execute(
         cleanup_worktree(worktree_path, delete_branch=True)
         raise ValueError("LLM response contained no valid code blocks")
 
-    # 6. Apply files in the worktree and generate the diff
-    git_diff = _make_git_diff(worktree_path, files)
-    log(f"diff size: {len(git_diff)} chars")
+    # 6. Apply files in the worktree
+    apply_diff_to_worktree(worktree_path, files)
 
     # 7. Commit changes in the worktree
     commit_message = f"feat({task['task_id']}): {task['description'][:50]}"
@@ -301,6 +288,10 @@ async def execute(
 
     if not committed:
         log("⚠ No changes to commit")
+
+    # 8. Get the diff from the main branch (after commit, so git diff main...HEAD works)
+    git_diff = get_diff_from_main(worktree_path)
+    log(f"diff size: {len(git_diff)} chars")
 
     # 8. Build the artifact
     raw_artifact = {

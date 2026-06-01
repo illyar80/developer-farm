@@ -18,19 +18,12 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
 from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from contracts import CodeArtifact, Verdict, VerificationRubric
 
 console = Console()
-
-# Use Ollama locally
-DEFAULT_OLLAMA_MODEL = os.getenv(
-    "OLLAMA_VERIFIER_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5-coder:3b-instruct")
-)
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
 
 # ─── Rubric (hard-coded and NEVER passed to the worker) ─────────────────────
@@ -74,11 +67,6 @@ Output format (JSON):
 ```
 
 Be strict. If code has bugs, missing type hints, or poor error handling — fail it."""
-
-
-def _get_ollama_model() -> str:
-    """Return the Ollama model name."""
-    return DEFAULT_OLLAMA_MODEL
 
 
 def _is_no_endpoints_error(exc: Exception) -> bool:
@@ -237,8 +225,15 @@ async def verify(
     tests_passed_flag, tests_passed_count, tests_total = _run_tests(workdir, files)
     console.print()
 
-    model_name = _get_ollama_model()
-    console.print("🤖 Calling Ollama for code review...")
+    model_name = os.getenv("OPENROUTER_VERIFIER_MODEL", "openai/gpt-oss-120b:free")
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY not set in environment. "
+            "Get one at: https://openrouter.ai/keys"
+        )
+
+    console.print("🤖 Calling OpenRouter for code review...")
     console.print(f"🤖 Model: {model_name}")
     user_prompt = f"""# Git Diff
 {artifact["git_diff"]}
@@ -249,12 +244,12 @@ async def verify(
 Review this code strictly according to the rubric. Output JSON as specified."""
 
     llm = ChatOpenAI(
-        base_url=OLLAMA_BASE_URL,
-        api_key=SecretStr("ollama"),  # Ollama does not require a real API key
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
         model=model_name,
         temperature=0.2,
-        max_completion_tokens=1024,
-        timeout=timeout_sec,
+        max_tokens=1024,
+        request_timeout=timeout_sec,
     )
 
     try:
@@ -269,7 +264,7 @@ Review this code strictly according to the rubric. Output JSON as specified."""
         raw_output = str(response.content).strip()
         console.print(f"✅ Response from {model_name}: {len(raw_output)} chars\n")
     except Exception as e:
-        console.print(f"[red]❌ Ollama call failed: {e}[/]")
+        console.print(f"[red]❌ OpenRouter call failed: {e}[/]")
         raise
 
     try:
@@ -326,20 +321,10 @@ if __name__ == "__main__":
 
     load_dotenv()
 
-    # Check that Ollama is available
-    import requests
-
-    try:
-        response = requests.get(
-            f"{OLLAMA_BASE_URL.replace('/v1', '')}/api/tags", timeout=2
-        )
-        if response.status_code != 200:
-            console.print("[red]❌ Ollama not responding[/]")
-            console.print("Start Ollama: ollama serve")
-            raise SystemExit(1)
-    except requests.exceptions.RequestException:
-        console.print("[red]❌ Cannot connect to Ollama[/]")
-        console.print(f"Check that Ollama is running on {OLLAMA_BASE_URL}")
+    # Validate API key
+    if not os.getenv("OPENROUTER_API_KEY"):
+        console.print("[red]❌ OPENROUTER_API_KEY not set in .env[/]")
+        console.print("[dim]Get your key at: https://openrouter.ai/keys[/]")
         raise SystemExit(1)
 
     artifact_path = Path("work/mvp/results/artifact.json")

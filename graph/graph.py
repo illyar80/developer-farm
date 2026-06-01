@@ -9,6 +9,8 @@ Connects Planning → Execution → Verification into one graph with:
 """
 
 import asyncio
+import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -62,6 +64,46 @@ def build_graph(checkpointer: Any) -> Any:
     return builder.compile(checkpointer=checkpointer)
 
 
+def _save_final_report(
+    final_state: dict[str, Any],
+    user_spec_path: str,
+    duration_sec: float,
+    results_dir: str = "work/mvp/results",
+) -> None:
+    """
+    Save the pipeline final report to disk as JSON.
+    """
+    verdicts = final_state.get("verdicts", [])
+    last_verdict = verdicts[-1] if verdicts else None
+
+    task_dict = None
+    if "task" in final_state:
+        task = final_state["task"]
+        if hasattr(task, "get"):
+            task_dict = dict(task)
+
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "user_spec": user_spec_path,
+        "task": task_dict,
+        "iterations": final_state.get("iteration", 0),
+        "final_passed": last_verdict["passed"] if last_verdict else False,
+        "verdicts": verdicts,
+        "artifacts_count": len(final_state.get("artifacts", [])),
+        "total_duration_sec": round(duration_sec, 2),
+        "total_cost_usd": round(final_state.get("total_cost", 0), 3),
+        "goodhart_proof": True,
+    }
+
+    out = Path(results_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "00_final_report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    console.print(f"[green]📄 Report saved: {out / '00_final_report.json'}[/]")
+
+
 async def run_pipeline_with_langgraph(
     user_spec_path: str,
     feature_name: str = "default",
@@ -105,6 +147,8 @@ async def run_pipeline_with_langgraph(
 
     console.print("\n[bold]▶️  Invoking graph...[/]\n")
 
+    pipeline_start = time.time()
+
     if AsyncSqliteSaver is not None:
         Path(checkpoint_db).parent.mkdir(parents=True, exist_ok=True)
         console.print(f"[dim]Using SQLite checkpoints: {checkpoint_db}[/]")
@@ -119,6 +163,8 @@ async def run_pipeline_with_langgraph(
         graph = build_graph(InMemorySaver())
         final_state = await graph.ainvoke(initial_state, config)
         persistence_label = "memory"
+
+    total_duration = time.time() - pipeline_start
 
     console.print("\n" + "=" * 70)
     console.print("[bold]📊 LANGGRAPH FINAL STATE[/]")
@@ -140,6 +186,8 @@ async def run_pipeline_with_langgraph(
 
     console.print(f"\n[bold]💾 Checkpoint saved to {persistence_label}[/]")
     console.print(f"[dim]You can resume with thread_id={thread_id}[/]")
+
+    _save_final_report(final_state, user_spec_path, total_duration)
 
     return final_state
 

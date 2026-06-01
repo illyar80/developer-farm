@@ -219,12 +219,12 @@ def cleanup_worktree(worktree_path: Path, delete_branch: bool = False):
         )
 
         branch_name = None
-        for line in result.stdout.split("\n"):
-            if str(worktree_path) in line:
-                # The next line after the worktree path contains the branch
-                continue
-            if line.startswith("branch refs/heads/"):
-                branch_name = line.replace("branch refs/heads/", "").strip()
+        for entry in result.stdout.strip().split("\n\n"):
+            if str(worktree_path) in entry:
+                for line in entry.split("\n"):
+                    if line.startswith("branch refs/heads/"):
+                        branch_name = line.replace("branch refs/heads/", "").strip()
+                        break
                 break
 
         # git worktree remove

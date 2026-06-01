@@ -277,7 +277,7 @@ async def plan(
     llm = ChatOpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=api_key,
-        model=os.getenv("OPENROUTER_MODEL", "qwen/qwen3.7-max"),
+        model=os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free"),
         temperature=0.3,
         max_tokens=1024,
         request_timeout=60,
