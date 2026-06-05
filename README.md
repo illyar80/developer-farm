@@ -28,13 +28,7 @@ When AI agents see tests and acceptance criteria, they inevitably optimize code 
 ```text
 PLANNING        →  TaskInput (NO criteria)
                    ↓
-CONTEXT ROUTER  →  Compressed context (budget allocation)
-                   ↓
-MODEL ROUTER    →  execution_config (tier selection)
-                   ↓
 EXECUTION       →  CodeArtifact (NO author info)
-                   ↓
-STATIC GATE     →  Lint check (skip LLM on syntax errors)
                    ↓
 VERIFICATION    →  Verdict (score + reason)
                    ↓
@@ -44,12 +38,8 @@ RETRY LOOP      →  Abstract Feedback (NO rubric revealed)
 | Layer | Input | 🚫 Restricted From |
 | :--- | :--- | :--- |
 | **Planning** | User spec, codebase | Execution results, verdicts |
-| **Context Router** | TaskInput | Rubric, acceptance criteria |
-| **Model Router** | TaskInput (deterministic + LLM) | Rubric, verdicts, task descriptions |
 | **Execution** | Task description | **Acceptance criteria, tests, rubrics** |
-| **Static Gate** | Code diff | Rubric, task prompt |
 | **Verification** | Git diff, rubric | **Worker ID, task description, author** |
-| **Optimization** | Aggregated metrics | Artifact contents, raw logs |
 
 ## 📸 Live Demo
 
