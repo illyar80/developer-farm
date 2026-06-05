@@ -27,6 +27,10 @@ class TaskInput(TypedDict):
     context_files: list[str]  # File paths to read for context
     language: str  # "python", "php", "typescript"
     target_path: str  # Where to write the result
+    tier: NotRequired[str]  # "standard" | "adversarial" | "swe_bench"
+    complexity: NotRequired[str]  # "low" | "medium" | "high"
+    required_capabilities: NotRequired[list[str]]  # Abstract capability tags for Model Router
+    complexity_estimate: NotRequired[str]  # "low" | "medium" | "high" — Planning's estimate
     # ❌ acceptance_criteria: str      ← FORBIDDEN
     # ❌ test_cases: list[dict]        ← FORBIDDEN
     # ❌ rubric: dict                  ← FORBIDDEN
@@ -46,6 +50,7 @@ class CodeArtifact(TypedDict):
     artifact_id: str  # UUID
     task_id: str  # Reference to the task, for traceability
     files_changed: list[str]  # List of modified files
+    files: NotRequired[dict[str, str]]  # filename → content (for downstream analyzers)
     git_diff: str  # Patch in unified diff format
     logs: str  # Generation process logs
     worktree_path: NotRequired[str]  # New
@@ -63,6 +68,7 @@ class CodeArtifact(TypedDict):
 class Verdict(TypedDict):
     """
     Result of blind verification.
+    Consensus adds optional fields for ensemble evaluation.
     """
 
     artifact_id: str
@@ -73,6 +79,11 @@ class Verdict(TypedDict):
     rubric_applied: dict  # Which evaluation criteria were applied
     tests_passed: int
     tests_total: int
+    # Consensus fields (optional, CONCENSUS_VERIFIER=true)
+    consistency: NotRequired[float]          # 0.0-1.0, ensemble agreement
+    verifier_breakdown: NotRequired[dict]    # {model_name: score}
+    abstract_feedback: NotRequired[str]      # Intersection of verifier reasons
+    verdict_confidence: NotRequired[str]     # "HIGH_CONFIDENCE" | "LOW_CONFIDENCE" | "ESCALATED"
     # ❌ worker_id: str                ← FORBIDDEN
     # ❌ task_description: str         ← FORBIDDEN
 

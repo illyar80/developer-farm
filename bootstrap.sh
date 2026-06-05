@@ -91,9 +91,9 @@ pip install -q \
 echo "   ✅ Python environment ready"
 
 # ─── 5. Download model ───────────────────────────────────────────────────
-echo "🧠 [5/7] Pulling qwen2.5-coder:3b-instruct (Q4_K_M)..."
-echo "   ⏳ This may take 2-5 minutes depending on your internet"
-ollama pull qwen2.5-coder:3b-instruct
+echo "🧠 [5/7] Pulling qwen2.5-coder:7b-instruct-q4_k_m (Q4_K_M)..."
+echo "   ⏳ This may take 5-10 minutes depending on your internet"
+ollama pull qwen2.5-coder:7b-instruct-q4_k_m
 echo "   ✅ Model downloaded to $PROJECT_DIR/models/ollama"
 
 # ─── 6. Generate .env and project structure ──────────────────────────────
@@ -107,7 +107,9 @@ cat > "$PROJECT_DIR/.env" << EOF
 # LLM (Ollama OpenAI-compatible API)
 OPENAI_API_BASE=http://localhost:11434/v1
 OPENAI_API_KEY=ollama
-MODEL_NAME=qwen2.5-coder:3b-instruct
+MODEL_NAME=qwen2.5-coder:7b-instruct-q4_k_m
+MODEL_LOCAL_SMALL=qwen2.5-coder:7b-instruct-q4_k_m
+MODEL_LOCAL_MEDIUM=qwen2.5-coder:7b-instruct-q4_k_m
 MAX_CONTEXT_LENGTH=4096
 
 # OpenRouter API (for Planning and Verification)
@@ -151,8 +153,8 @@ echo "✅ Bootstrap Complete!"
 echo "=============================================="
 echo ""
 echo "📁 Project:    $PROJECT_DIR"
-echo "🦙 Model:      Qwen2.5-Coder-3B-Instruct (stored on /dev/sda)"
-echo "🖥️  VRAM:       ~2.4GB GPU + ~1.8GB RAM offload (safe for 4GB)"
+echo "🦙 Model:      Qwen2.5-Coder-7B-Q4_K_M (stored on /dev/sda)"
+echo "🖥️  VRAM:       ~3.5GB GPU (safe for 4GB, ~500 MiB free)"
 echo "💾 RAM:         16GB (Redis + LangGraph + aiohttp overhead < 500MB)"
 echo ""
 echo "Next steps:"

@@ -31,7 +31,7 @@ from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from rich.console import Console
+from utils.output import console
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -45,7 +45,6 @@ try:
 except ImportError:
     NEO4J_AVAILABLE = False
 
-console = Console()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -61,6 +60,9 @@ Your output MUST be a JSON object with these exact fields:
 - context_files: list of strings (paths to existing files for context)
 - language: string (programming language: "python", "javascript", "typescript", etc.)
 - target_path: string (where the new code should be written)
+- required_capabilities: list of strings — abstract capability tags for model selection
+  (e.g. ["python", "backend"], ["javascript", "frontend"], ["python", "data_science"])
+- complexity_estimate: string — "low" | "medium" | "high" — how complex is this task
 
 CRITICAL RULES:
 1. Description must be TECHNICAL (how to implement), not BEHAVIORAL (what tests check)
@@ -75,7 +77,9 @@ Example output:
   "description": "Create a Python module with function `is_palindrome(s: str) -> bool` that normalizes input and checks symmetry.",
   "context_files": ["src/utils/__init__.py"],
   "language": "python",
-  "target_path": "src/utils/palindrome.py"
+  "target_path": "src/utils/palindrome.py",
+  "required_capabilities": ["python", "basic"],
+  "complexity_estimate": "low"
 }"""
 
 
@@ -205,6 +209,113 @@ def _get_neo4j_context(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# STRUCTURAL PATTERN ENRICHMENT (Step 2)
+# ═══════════════════════════════════════════════════════════════════
+
+_ROUTE_PATTERN = re.compile(
+    r"router\.(get|post|put|delete|patch)\s*\(['\"]([^'\"]+)['\"]"
+)
+_RES_PATTERN = re.compile(
+    r"res\.status\((\d+)\)\.json\((\{[^}]*\})\)"
+)
+_FIELD_PATTERN = re.compile(
+    r"(?:id|email|name|token|amount|code|createdAt|final_amount|discount_applied)"
+    r"\s*[=:]"
+)
+_REQUIRE_PATTERN = re.compile(
+    r"(?:const|let|var)\s+\{?(\w+(?:\s*,\s*\w+)*)\}?\s*=\s*require\(['\"]([^'\"]+)['\"]"
+)
+
+
+def _extract_route_patterns(content: str) -> list[str]:
+    patterns = []
+    for match in _ROUTE_PATTERN.finditer(content):
+        verb, path = match.groups()
+        patterns.append(f"  {verb.upper()} {path}")
+    return patterns
+
+
+def _extract_response_examples(content: str) -> list[str]:
+    examples = []
+    for match in _RES_PATTERN.finditer(content):
+        status, body = match.groups()
+        examples.append(f"  {status} → {body}")
+    return examples
+
+
+def _extract_import_roles(content: str) -> list[str]:
+    """Map imported modules to their likely purpose based on name."""
+    roles = []
+    for match in _REQUIRE_PATTERN.finditer(content):
+        vars_str, mod_path = match.groups()
+        vars_list = [v.strip() for v in vars_str.split(",")]
+        for v in vars_list:
+            if "valid" in v.lower() or "schema" in mod_path.lower():
+                roles.append(f"  {v}: validation")
+            elif "db" in mod_path.lower() or "database" in mod_path.lower() or "model" in mod_path.lower():
+                roles.append(f"  {v}: data access")
+            elif "auth" in v.lower() or "jwt" in v.lower() or "token" in v.lower():
+                roles.append(f"  {v}: authentication")
+            elif "password" in mod_path.lower() or "hash" in mod_path.lower():
+                roles.append(f"  {v}: password handling")
+            elif "discount" in mod_path.lower() or "coupon" in mod_path.lower():
+                roles.append(f"  {v}: discount/promotion logic")
+            elif "email" in mod_path.lower():
+                roles.append(f"  {v}: email handling")
+            else:
+                roles.append(f"  {v}: {mod_path.split('/')[-1].replace('.js', '')}")
+    return roles
+
+
+def enrich_task_description(
+    spec: str,
+    context_files: list[str] | None = None,
+) -> str:
+    """
+    Извлекает структурные паттерны из codebase (роуты, схемы ответов, поля)
+    и добавляет их как 'Structural Requirements' к описанию задачи.
+
+    Это НЕ нарушает Goodhart-proof изоляцию, потому что это факты о структуре
+    кодовой базы, а не критерии оценки или тесты.
+    """
+    if not context_files:
+        return spec
+
+    routes: list[str] = []
+    responses: list[str] = []
+    imports: list[str] = []
+    seen_routes: set[str] = set()
+
+    for fpath in context_files:
+        try:
+            content = Path(fpath).read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, OSError):
+            continue
+
+        for r in _extract_route_patterns(content):
+            if r not in seen_routes:
+                seen_routes.add(r)
+                routes.append(r)
+
+        responses.extend(_extract_response_examples(content))
+        imports.extend(_extract_import_roles(content))
+
+    if not routes and not responses and not imports:
+        return spec
+
+    blocks: list[str] = []
+    if routes:
+        blocks.append("Route patterns found in project:\n" + "\n".join(routes))
+    if responses:
+        blocks.append("Response examples in project:\n" + "\n".join(responses))
+    if imports:
+        blocks.append("Module roles in project:\n" + "\n".join(imports))
+
+    structural_note = "\n\nStructural Requirements:\n" + "\n\n".join(blocks)
+    return spec + structural_note
+
+
+# ═══════════════════════════════════════════════════════════════════
 # MAIN PLANNING FUNCTION
 # ═══════════════════════════════════════════════════════════════════
 
@@ -247,6 +358,10 @@ async def plan(
     console.print(f"📄 Reading: {user_spec_path}")
     console.print(f"📝 Spec length: {len(user_spec)} chars\n")
     
+    # ─── Extract metadata headers from spec (tier, complexity) ──────
+    spec_tier = re.search(r"^## Tier\s*\n(.+)", user_spec, re.MULTILINE)
+    spec_complexity = re.search(r"^## Complexity\s*\n(.+)", user_spec, re.MULTILINE)
+
     # ─── Extract target path hint from spec (for Neo4j query) ───────
     target_path_hint = _extract_target_path_from_spec(user_spec)
     if target_path_hint:
@@ -292,6 +407,9 @@ Output MUST be a JSON object with:
 - context_files: list of strings
 - language: string
 - target_path: string
+- required_capabilities: list of strings — abstract capability tags for model selection
+  (e.g. ["python", "backend"], ["javascript", "frontend"], ["python", "data_science"])
+- complexity_estimate: string — "low" | "medium" | "high" — how complex is this task
 
 {context_info}
 {external_docs}
@@ -355,7 +473,32 @@ Output ONLY the JSON object."""
     for field in required_fields:
         if field not in task_dict:
             raise ValueError(f"Missing required field in LLM response: {field}")
+
+    # Validate complexity_estimate if present
+    valid_estimates = {"low", "medium", "high"}
+    if "complexity_estimate" in task_dict:
+        if task_dict["complexity_estimate"] not in valid_estimates:
+            console.print(f"[yellow]⚠ Invalid complexity_estimate: {task_dict['complexity_estimate']}, defaulting to medium[/]")
+            task_dict["complexity_estimate"] = "medium"
     
+    # ─── Inject tier/complexity from spec metadata (NOT from LLM) ────
+    if spec_tier:
+        task_dict["tier"] = spec_tier.group(1).strip()
+        console.print(f"[cyan]🏷 Tier: {task_dict['tier']}[/]")
+    if spec_complexity:
+        task_dict["complexity"] = spec_complexity.group(1).strip()
+        console.print(f"[cyan]📊 Complexity: {task_dict['complexity']}[/]")
+    
+    # ─── Structural enrichment (Step 2: inject codebase patterns) ───
+    enriched_spec = enrich_task_description(
+        spec=task_dict["description"],
+        context_files=task_dict.get("context_files", [])
+        + task_dict.get("structural_refs", []),
+    )
+    if enriched_spec != task_dict["description"]:
+        task_dict["description"] = enriched_spec
+        console.print(f"[green]📐 Enriched spec with structural patterns[/]")
+
     # ─── Seal the task (Goodhart-proof barrier) ─────────────────────
     # This function strips any forbidden fields and validates the structure.
     # If someone tried to add acceptance_criteria, it will raise ValueError.
@@ -365,7 +508,10 @@ Output ONLY the JSON object."""
     # ─── Display the result ─────────────────────────────────────────
     console.print(f"\n[bold green]═══ TASK GENERATED ═══[/]")
     console.print(f"ID: {sealed_task['task_id']}")
-    console.print(f"Language: {sealed_task['language']}")
+    console.print(f"Tier: {sealed_task.get('tier', '—')} | Complexity: {sealed_task.get('complexity', '—')}")
+    caps = sealed_task.get("required_capabilities", [])
+    console.print(f"Language: {sealed_task['language']} | Capabilities: {', '.join(caps) if caps else '—'}")
+    console.print(f"Complexity estimate: {sealed_task.get('complexity_estimate', '—')}")
     console.print(f"Target: {sealed_task['target_path']}")
     console.print(f"Context files: {len(sealed_task['context_files'])}")
     

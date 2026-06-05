@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Optional
 
 from neo4j import GraphDatabase
-from rich.console import Console
+from utils.output import console
 
-console = Console()
+
 
 
 class CodeGraph:

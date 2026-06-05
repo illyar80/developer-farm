@@ -12,8 +12,8 @@ Autonomous AI development pipeline that generates code from specifications with 
 
 ## ✨ Key Metrics
 
-- ⏱️ **26 seconds** per feature (planning → execution → verification)
-- 💰 **$0.03** per feature (vs $0.40+ for SaaS tools)
+- ⏱️ **110 seconds** per feature (planning → execution → verification)
+- 💰 **$0.00** per feature (local Ollama + OpenRouter free tier)
 - 🔒 **Zero metric leakage** between layers (TypedDict enforced isolation)
 - 🏠 **Runs locally** on GTX 1050 Ti (4GB VRAM) + 16GB RAM
 
@@ -45,14 +45,14 @@ RETRY LOOP      →  Abstract Feedback (NO rubric revealed)
 
 ![Developer Farm Dashboard](docs/assets/dashboard-screenshot.png)
 
-*Pipeline execution: Planning → Execution → Verification in 26 seconds*
+*Pipeline execution: Planning → Execution → Verification in 110 seconds*
 
 ## 🏗 Architecture
 
 ### Core Components
 - **LangGraph**: State machine with SQLite persistence and streaming.
 - **Model Router**: 10-tier routing (local_small → cloud_ollama → openrouter) with deterministic scoring + LLM-assisted provider chain.
-- **Ollama + Qwen3-coder-next (80B)**: Cloud execution layer. Local fallback: Qwen2.5-Coder-3B, CodeLlama-7B.
+- **Ollama + Qwen2.5-Coder-7B (Q4_K_M)**: Local execution layer. Fits on 4GB VRAM (~3503 MiB used).
 - **OpenRouter API**: Planning (gpt-oss-120b:free) and Verification (gpt-oss-120b:free).
 - **Git Worktrees**: Isolated branches per worker (`agent/{task_id}-{id}`).
 - **Reconciler**: Kubernetes-style control loop for auto-recovery.
@@ -67,13 +67,29 @@ When verification fails, the system generates abstract guidance without revealin
 
 ## 📊 Benchmarks
 
-### Task: Python Calculator Module
+### Ablation Study (7B Local Model, 6 Tasks, 2 Tiers)
+
+Results comparing **isolated** vs **non-isolated** execution:
+
+| Metric | Non-Isolated | Isolated |
+| :--- | :--- | :--- |
+| **Verification Score (Standard)** | 0.698 | 0.563 |
+| **Verification Score (Adversarial)** | 0.533 | 0.720 |
+| **Fixture Pass Rate** | 0.667 | 0.875 |
+| **Functional Correctness** | 0.667 | 0.833 |
+| **Generalization (Held-Out)** | 0.229 | 0.390 |
+| **Mean Latency** | 90.6s | 130.2s |
+| **Cost per task** | **$0.00** | **$0.00** |
+
+Isolation improves adversarial scores (+0.186) and reduces verification gaps, but reduces standard-tier scores (-0.135). No specification gaming observed in either condition.
+
+### Baseline: Python Calculator Module
 *Spec: `add`, `subtract`, `multiply`, `divide`, division by zero handling, type hints.*
 
 | Metric | Developer Farm | SaaS Competitors |
 | :--- | :--- | :--- |
 | **Total Time** | 26.4s | 1–3 mins |
-| **Total Cost** | **$0.030** | $0.40 – $10+ |
+| **Total Cost** | **$0.000** | $0.40 – $10+ |
 | **Iterations** | 1 (Pass) | 2–4 (Avg) |
 | **Verification Score** | 0.97 / 1.0 | N/A (Opaque) |
 

@@ -21,10 +21,10 @@ _MODEL_REGISTRY: list[dict[str, Any]] = [
     # ── Local Ollama Models ────────────────────────────────────────────────
     {
         "id": "local_small",
-        "model": "qwen2.5-coder:3b-instruct",
+        "model": os.getenv("MODEL_LOCAL_SMALL", "qwen2.5-coder:7b-instruct-q4_k_m"),
         "base_url": "http://localhost:11434/v1",
         "api_key": "ollama",
-        "max_tokens": 2048,
+        "max_tokens": 4096,
         "cost_per_1k": 0.0,
         "provider": "ollama",
         "strengths": ["python", "basic", "fast", "low_complexity"],
@@ -32,7 +32,7 @@ _MODEL_REGISTRY: list[dict[str, Any]] = [
     },
     {
         "id": "local_medium",
-        "model": os.getenv("MODEL_LOCAL_MEDIUM", "codellama:7b-instruct"),
+        "model": os.getenv("MODEL_LOCAL_MEDIUM", "qwen2.5-coder:7b-instruct-q4_k_m"),
         "base_url": "http://localhost:11434/v1",
         "api_key": "ollama",
         "max_tokens": 4096,

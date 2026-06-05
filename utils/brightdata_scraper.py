@@ -9,9 +9,8 @@ import os
 import re
 import requests
 from bs4 import BeautifulSoup
-from rich.console import Console
+from utils.output import console
 
-console = Console()
 
 BRIGHTDATA_PROXY = os.getenv("BRIGHTDATA_PROXY", "")
 MAX_DOC_CHARS = 2500  # Лимит на одну библиотеку (защита контекстного окна)

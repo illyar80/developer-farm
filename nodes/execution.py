@@ -18,7 +18,7 @@ from typing import Any, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
-from rich.console import Console
+from utils.output import console
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from contracts import CodeArtifact, TaskInput, seal_artifact_for_verification
@@ -30,7 +30,7 @@ from utils.git_worktree import (
     get_diff_from_main,
 )
 
-console = Console()
+
 
 # ─── Prompts (with no mention of tests or evaluation criteria) ─────────────
 SYSTEM_PROMPT = """You are a precise code generator. You receive:
@@ -62,6 +62,168 @@ def _build_user_prompt(task: TaskInput, context_contents: dict[str, str]) -> str
     parts = [f"# Task\n{task['description']}\n"]
     parts.append(f"# Language\n{task['language']}\n")
     parts.append(f"# Target Path\n{task['target_path']}\n")
+
+    if task.get("language") == "javascript":
+        parts.append(
+            "\n# Code Structure\n"
+            "Use `const router = express.Router();` and export as `module.exports = { router };`. "
+            "The handler function receives (req, res). "
+            "Use `res.status(CODE).json({...})` for responses.\n"
+            "\n"
+            "# Route Path\n"
+            "Define your route at the path specified in the task description "
+            "(e.g., /api/users, /api/register, /api/checkout). "
+            "Do NOT use a different route path.\n"
+            "\n"
+            "# Response Format\n"
+            "Return JSON responses as flat objects. "
+            "Place all expected fields (id, email, name, token, etc.) at the top level "
+            "of the response object — do NOT nest them under 'user', 'data', or other wrapper keys.\n"
+            "\n"
+            "# Required Fields\n"
+            "Only validate fields explicitly mentioned in the task description. "
+            "Do NOT require additional fields that are not specified in the description.\n"
+            "\n"
+            "# Input Validation\n"
+            "If you need input validation, import `check` and `validationResult` "
+            "directly from `'express-validator'` at the top of your route file. "
+            "Do NOT reference `check` or `validationResult` without importing them.\n"
+        )
+
+    if task.get("language") == "php":
+        caps = task.get("required_capabilities", [])
+        desc = task.get("description", "").lower()
+        is_wordpress = (
+            any(kw in caps for kw in ("wordpress", "wp", "wp_theme", "wp_plugin", "wp_rest_api"))
+            or "wordpress" in desc
+        )
+        is_yii2 = any(kw in caps for kw in ("yii2", "yii")) or "yii2" in desc
+
+        if is_wordpress:
+            parts.append(
+                "\n# WordPress Conventions\n"
+                "Follow WordPress Coding Standards (WPCS). "
+                "Use snake_case for function names and lowercase with underscores for hooks.\n"
+                "\n"
+                "# Hooks (Actions & Filters)\n"
+                "Use `add_action('hook_name', 'callback_func')` and "
+                "`add_filter('filter_name', 'callback_func')`. "
+                "Prefix custom hooks with the plugin/theme slug. "
+                "Define callback functions as `prefix_feature_action()`.\n"
+                "\n"
+                "# Enqueuing Assets\n"
+                "Use `wp_enqueue_script()` and `wp_enqueue_style()` with proper handles, "
+                "dependencies, version, and footer placement. "
+                "Hook into `wp_enqueue_scripts` action.\n"
+                "\n"
+                "# WP_Query & The Loop\n"
+                "Use `WP_Query` with `array` arguments for custom database queries. "
+                "Use `have_posts()` / `the_post()` loop pattern. "
+                "Use `wp_reset_postdata()` after custom queries.\n"
+                "\n"
+                "# WordPress REST API\n"
+                "Register routes via `register_rest_route()`. "
+                "Use `WP_REST_Request` and `WP_REST_Response`. "
+                "Set `permission_callback` for auth checks.\n"
+                "\n"
+                "# Database\n"
+                "Use `$wpdb->get_results()`, `$wpdb->get_row()`, `$wpdb->insert()`, "
+                "`$wpdb->update()` for direct queries. "
+                "Use `$wpdb->prepare()` with `%s`/`%d` placeholders for SQL injection prevention. "
+                "Prefix custom table names with `$wpdb->prefix`.\n"
+                "\n"
+                "# Options & Transients\n"
+                "Use `get_option()` / `update_option()` for persistent settings. "
+                "Use `set_transient()` / `get_transient()` for cached data.\n"
+                "\n"
+                "# Shortcodes\n"
+                "Register via `add_shortcode('tag', 'callback')`. "
+                "The callback receives `$atts` and `$content`, returns string output.\n"
+                "\n"
+                "# Response Format\n"
+                "For REST endpoints return `WP_REST_Response` or `WP_Error`. "
+                "Use `rest_ensure_response()` for data wrapping. "
+                "Place all expected fields at the top level of the response.\n"
+                "\n"
+                "# Required Fields\n"
+                "Only validate fields explicitly mentioned in the task description. "
+                "Do NOT require additional fields that are not specified.\n"
+            )
+        elif is_yii2:
+            parts.append(
+                "\n# Yii2 Conventions\n"
+                "Follow PSR-12 coding standard. Use `<?php` with `declare(strict_types=1);`.\n"
+                "\n"
+                "# MVC Structure\n"
+                "Controllers extend `yii\\web\\Controller`. "
+                "Actions are named `actionIndex()`, `actionCreate()`, etc. "
+                "Models extend `yii\\db\\ActiveRecord` for database tables. "
+                "Views are PHP files in `views/controller/action.php`.\n"
+                "\n"
+                "# Database (ActiveRecord)\n"
+                "Define table via `public static function tableName()` in the model. "
+                "Use `find()`, `findOne()`, `findAll()`, `find()->where(['col' => $val])->all()`. "
+                "Define validation rules in `public function rules()`. "
+                "Define attribute labels in `public function attributeLabels()`.\n"
+                "\n"
+                "# Database (Query Builder)\n"
+                "Use `(new \\yii\\db\\Query())->from('table')->where(['col' => $val])->all()`. "
+                "Always use parameter binding — never concatenate raw values into queries.\n"
+                "\n"
+                "# Request & Response\n"
+                "Access request data via `\\Yii::$app->request->get()`, "
+                "`\\Yii::$app->request->post()`. "
+                "Return JSON via `\\Yii::$app->response->data = [...]` "
+                "or `return $this->asJson([...])`.\n"
+                "\n"
+                "# REST API\n"
+                "For REST controllers extend `yii\\rest\\ActiveController`. "
+                "Configure `$modelClass` and `$serializer`. "
+                "Use `yii\\rest\\UrlRule` in URL rules for automatic route generation.\n"
+                "\n"
+                "# Data Providers\n"
+                "Use `yii\\data\\ActiveDataProvider` for paginated listings: "
+                "`new ActiveDataProvider(['query' => Model::find(), 'pagination' => ['pageSize' => 20]])`.\n"
+                "\n"
+                "# Behaviors\n"
+                "Attach behaviors via `public function behaviors()`. "
+                "Common: `TimestampBehavior`, `BlameableBehavior`, `yii\\filters\\VerbFilter` for controllers.\n"
+                "\n"
+                "# Required Fields\n"
+                "Only validate fields explicitly mentioned in the task description. "
+                "Do NOT require additional fields that are not specified.\n"
+            )
+        else:
+            parts.append(
+                "\n# Code Structure\n"
+                "Use `<?php` opening tag. Use `declare(strict_types=1);` on the first line "
+                "after the opening tag. Follow PSR-12 coding standard.\n"
+                "\n"
+                "# Namespace & Autoloading\n"
+                "Place the file in the correct namespace following PSR-4. "
+                "Use Composer autoloading conventions. "
+                "The namespace should match the directory structure from `src/`.\n"
+                "\n"
+                "# Routing (if applicable)\n"
+                "For Laravel: define routes in route files using `Route::` facade. "
+                "For Symfony: use attribute-based routing (`#[Route('/path')]`).\n"
+                "\n"
+                "# Response Format\n"
+                "For API controllers, return JSON responses using "
+                "`return response()->json([...])` (Laravel) or "
+                "`return $this->json([...])` (Symfony). "
+                "Place all expected fields at the top level — "
+                "do NOT nest under 'data' unless the spec explicitly says so.\n"
+                "\n"
+                "# Required Fields\n"
+                "Only validate fields explicitly mentioned in the task description. "
+                "Do NOT require additional fields that are not specified.\n"
+                "\n"
+                "# Input Validation\n"
+                "Use Form Request validation (Laravel) or the Validator component (Symfony). "
+                "Import validation classes at the top of the file. "
+                "Do NOT use raw `$_POST` or `$_GET` — use injected Request objects.\n"
+            )
 
     if context_contents:
         parts.append("# Context Files\n")
@@ -218,13 +380,41 @@ def _strip_path_echo(code: str, filepath: str) -> str:
 
 
 async def execute(
-    task: TaskInput, workdir: Optional[Path] = None, timeout_sec: int = 300
+    task: TaskInput,
+    workdir: Optional[Path] = None,
+    timeout_sec: int = 300,
+    model_name: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    execution_config: dict | None = None,
 ) -> CodeArtifact:
     """
     Main function of the EXECUTION layer using git worktrees.
+
+    Args:
+        task: The task to execute
+        workdir: Optional working directory override
+        timeout_sec: LLM call timeout in seconds
+        model_name: Override model name (default: MODEL_NAME env or qwen3-coder-next:cloud)
+        base_url: Override OpenAI-compatible base URL (default: OPENAI_API_BASE env or localhost:11434)
+        api_key: Override API key (default: OPENAI_API_KEY env or "ollama" for local)
+        execution_config: Optional dict from Model Router with keys: model, base_url, api_key, max_tokens.
+                          Overrides individual model_name/base_url/api_key params when provided.
     """
     artifact_id = str(uuid.uuid4())[:8]
     logs = []
+
+    # Determine model config: execution_config takes precedence
+    if execution_config:
+        actual_model = execution_config.get("model", os.getenv("MODEL_NAME", "qwen3-coder-next:cloud"))
+        actual_base = execution_config.get("base_url") or os.getenv("OPENAI_API_BASE", "http://localhost:11434/v1")
+        actual_api_key = execution_config.get("api_key") or os.getenv("CLOUD_API_KEY") or os.getenv("OPENAI_API_KEY", "ollama")
+        actual_timeout = execution_config.get("timeout", timeout_sec)
+    else:
+        actual_model = model_name or os.getenv("MODEL_NAME", "qwen3-coder-next:cloud")
+        actual_base = base_url or os.getenv("OPENAI_API_BASE", "http://localhost:11434/v1")
+        actual_api_key = api_key or os.getenv("CLOUD_API_KEY") or os.getenv("OPENAI_API_KEY", "ollama")
+        actual_timeout = timeout_sec
 
     def log(msg: str):
         logs.append(msg)
@@ -247,15 +437,16 @@ async def execute(
     user_prompt = _build_user_prompt(task, context_contents)
     log(f"prompt length: {len(user_prompt)} chars")
 
-    # 4. Call Ollama
-    log("calling Ollama (qwen2.5-coder:3b-instruct)")
+    # 4. Call LLM
+    log(f"calling {actual_model} @ {actual_base}")
+    max_tokens = execution_config.get("max_tokens", 2048) if execution_config else 2048
     llm = ChatOpenAI(
-        base_url=os.getenv("OPENAI_API_BASE", "http://localhost:11434/v1"),
-        api_key=SecretStr(os.getenv("OPENAI_API_KEY", "ollama")),
-        model=os.getenv("MODEL_NAME", "qwen2.5-coder:3b-instruct"),
+        base_url=actual_base,
+        api_key=SecretStr(actual_api_key),
+        model=actual_model,
         temperature=0.2,
-        max_completion_tokens=2048,
-        timeout=timeout_sec,
+        max_completion_tokens=max_tokens,
+        timeout=actual_timeout,
     )
 
     try:
@@ -266,7 +457,7 @@ async def execute(
         generated_text = _extract_text_content(response.content)
         log(f"generated {len(generated_text)} chars")
     except Exception as e:
-        log(f"❌ Ollama call failed: {e}")
+        log(f"❌ LLM call failed ({actual_model}): {e}")
         cleanup_worktree(worktree_path, delete_branch=True)
         raise
 
@@ -298,6 +489,7 @@ async def execute(
         "artifact_id": artifact_id,
         "task_id": task["task_id"],
         "files_changed": list(files.keys()),
+        "files": files,
         "git_diff": git_diff,
         "logs": "\n".join(logs),
         "worktree_path": str(worktree_path),  # New: persist the worktree path

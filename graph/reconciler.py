@@ -15,9 +15,7 @@ from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
-from rich.console import Console
-
-console = Console()
+from utils.output import console
 
 # ─── Settings ──────────────────────────────────────────────────────────────
 RECONCILE_INTERVAL_SEC = 10

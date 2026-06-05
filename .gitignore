@@ -20,6 +20,9 @@ work/**/results/
 .cache/
 models/
 
+# LaTeX artifacts
+tex/
+
 # IDE
 .vscode/
 .idea/
