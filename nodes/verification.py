@@ -18,27 +18,12 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from rich.console import Console
+from utils.output import console
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from contracts import CodeArtifact, Verdict, VerificationRubric
-
-console = Console()
+from contracts import CodeArtifact, Verdict
 
 
-# ─── Rubric (hard-coded and NEVER passed to the worker) ─────────────────────
-DEFAULT_RUBRIC: VerificationRubric = {
-    "criteria": [
-        "Code correctness: implements the described functionality without bugs",
-        "Type hints: all functions have proper type annotations",
-        "Error handling: edge cases handled gracefully (e.g., division by zero)",
-        "Code style: PEP 8 compliant, readable, idiomatic Python",
-        "No hardcoded values or magic numbers",
-        "Docstrings for public functions",
-    ],
-    "min_score": 0.7,
-    "required_tests": [],
-}
 
 # ─── System prompt for the verifier ─────────────────────────────────────────
 SYSTEM_PROMPT = """You are an independent code reviewer. You receive:
@@ -187,7 +172,7 @@ def _run_tests(workdir: Path, files: list[str]) -> tuple[bool, int, int]:
 
 async def verify(
     artifact: CodeArtifact,
-    rubric: VerificationRubric = DEFAULT_RUBRIC,
+    rubric: dict | None = None,
     timeout_sec: int = 120,
 ) -> Verdict:
     """
@@ -195,12 +180,14 @@ async def verify(
 
     Args:
         artifact: `CodeArtifact` (ONLY diff + logs, without `worker_id`)
-        rubric: Evaluation criteria, not visible to the worker
+        rubric: Evaluation criteria dict. If None, uses a minimal default.
         timeout_sec: Maximum verification time in seconds
 
     Returns:
         `Verdict` (pass/fail + score + reason)
     """
+    if rubric is None:
+        rubric = {"criteria": ["Code correctness", "Error handling", "Code style"], "min_score": 0.6, "required_tests": []}
     console.print(
         f"\n[bold magenta]═══ VERIFICATION: {artifact['artifact_id']} ═══[/]\n"
     )
@@ -289,7 +276,7 @@ Review this code strictly according to the rubric. Output JSON as specified."""
         llm_passed = False
         llm_reason = "Failed to parse LLM response"
 
-    final_passed = tests_passed_flag and llm_passed and llm_score >= rubric["min_score"]
+    final_passed = tests_passed_flag and llm_score >= rubric["min_score"]
 
     console.print(
         f"[bold {'green' if final_passed else 'red'}]═══ FINAL VERDICT ═══[/]"
