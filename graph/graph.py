@@ -1,11 +1,13 @@
 """
 LangGraph StateGraph — Developer Farm Orchestrator
 ---------------------------------------------------
-Connects Planning → Execution → Verification into one graph with:
-- Conditional edges (retry loop)
+Multi-layer graph with:
+- Planning -> Execution -> Verification loop
+- Wave orchestration (multiple execute/verify iterations)
+- Auto-merge for high-quality code
+- Human-in-the-loop approval for borderline artifacts
+- Optimization analysis after pipeline completion
 - Persistence (SQLite / memory)
-- Streaming (astream_events)
-- Time-travel debugging
 """
 
 import asyncio
@@ -13,11 +15,12 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
-from rich.console import Console
+from utils.output import console
 from rich.panel import Panel
 
 try:
@@ -25,43 +28,160 @@ try:
 except ImportError:
     AsyncSqliteSaver = None
 
-from langgraph.checkpoint.memory import InMemorySaver
-
-from graph.nodes import execution_node, planning_node, should_retry, verification_node
+from graph.nodes import (
+    approve_verification_node,
+    context_router_node,
+    execute_subtask_node,
+    execution_node,
+    model_router_node,
+    optimization_node,
+    planning_node,
+    route_from_static_gate,
+    route_from_verification,
+    should_retry,
+    static_gate_node,
+    verify_wave_node,
+)
+from graph.state import GraphState
 from graph.state import GraphState
 
-console = Console()
 
 
-def build_graph(checkpointer: Any) -> Any:
-    """
-    Create and compile a LangGraph StateGraph.
+def build_graph(checkpointer: Any = None) -> Any:
+    """Create and compile a multi-layer LangGraph StateGraph."""
+    if checkpointer is None:
+        checkpointer = InMemorySaver()
 
-    Args:
-        checkpointer: LangGraph checkpointer instance
-
-    Returns:
-        Compiled graph with the provided checkpointer
-    """
     builder = StateGraph(GraphState)
 
-    builder.add_node("planning", cast(Any, planning_node))
-    builder.add_node("execution", cast(Any, execution_node))
-    builder.add_node("verification", cast(Any, verification_node))
+    # Nodes
+    builder.add_node("planning", planning_node)
+    builder.add_node("context_router", context_router_node)
+    builder.add_node("model_router", model_router_node)
+    builder.add_node("execution", execution_node)
+    builder.add_node("execute_subtask", execute_subtask_node)
+    builder.add_node("static_gate", static_gate_node)
+    builder.add_node("verification", verify_wave_node)
+    builder.add_node("approve", approve_verification_node)
+    builder.add_node("optimization", optimization_node)
 
+    # Entry
     builder.set_entry_point("planning")
-    builder.add_edge("planning", "execution")
-    builder.add_edge("execution", "verification")
+
+    # Planning -> Context Router -> Model Router -> execution with wave management
+    builder.add_edge("planning", "context_router")
+    builder.add_edge("context_router", "model_router")
+    builder.add_edge("model_router", "execute_subtask")
+
+    # execute_subtask -> static_gate (pre-verification)
+    builder.add_edge("execute_subtask", "static_gate")
+
+    # static_gate: if passed → verification, if failed → retry (skip LLM verification)
+    builder.add_conditional_edges(
+        "static_gate",
+        route_from_static_gate,
+        {"pass": "verification", "fail": "execute_subtask"},
+    )
+
+    # Verification routing
     builder.add_conditional_edges(
         "verification",
-        should_retry,
+        route_from_verification,
         {
-            "retry": "execution",
-            "done": END,
+            "approve": "approve",
+            "retry": "execute_subtask",
+            "done": "optimization",
         },
     )
 
+    # Approval -> done (or back to execution on retry)
+    builder.add_edge("approve", "optimization")
+
+    # Optimization -> END
+    builder.add_edge("optimization", END)
+
     return builder.compile(checkpointer=checkpointer)
+
+
+async def run_pipeline(
+    user_spec_path: str,
+    feature_name: str = "default",
+    benchmark: bool = False,
+    suppress_progress: bool = False,
+) -> dict[str, Any]:
+    """
+    Run the full multi-layer pipeline.
+
+    Args:
+        user_spec_path: Path to user specification file
+        feature_name: Feature name
+        benchmark: If True, auto-approve borderline artifacts
+        suppress_progress: If True, skip progress bar start/stop (caller manages it)
+
+    Returns:
+        Final pipeline state
+    """
+    thread_id = f"feature-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    console.print(
+        Panel.fit(
+            f"[bold magenta]DEVELOPER FARM PIPELINE[/]\n"
+            f"[cyan]Thread: {thread_id}[/]\n"
+            f"[cyan]Spec: {user_spec_path}[/]",
+            border_style="magenta",
+        )
+    )
+
+    if not suppress_progress:
+        console.start()
+    pipeline_start = time.time()
+
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "auto_approve": benchmark,
+        }
+    }
+
+    initial_state: GraphState = {
+        "user_spec_path": user_spec_path,
+        "feature_name": feature_name,
+        "thread_id": thread_id,
+        "iteration": 0,
+        "artifacts": [],
+        "verdicts": [],
+        "current_wave": 1,
+        "completed_tasks": [],
+        "pending_approval": [],
+        "verification_pending": [],
+        "plan_output": {},
+    }
+
+    if AsyncSqliteSaver is not None:
+        async with AsyncSqliteSaver.from_conn_string("./data/checkpoints.db") as checkpointer:
+            graph = build_graph(checkpointer)
+            final_state = await graph.ainvoke(initial_state, config)
+    else:
+        graph = build_graph(InMemorySaver())
+        final_state = await graph.ainvoke(initial_state, config)
+
+    total_duration = time.time() - pipeline_start
+    if not suppress_progress:
+        console.stop()
+
+    console.print("\n" + "=" * 70)
+    console.print("[bold]PIPELINE FINAL STATE[/]")
+    console.print("=" * 70)
+    console.print(f"Thread: {thread_id}")
+    console.print(f"Completed tasks: {final_state.get('completed_tasks', [])}")
+    console.print(f"Artifacts: {len(final_state.get('artifacts', []))}")
+    console.print(f"Verdicts: {len(final_state.get('verdicts', []))}")
+    console.print(f"Total cost: ${final_state.get('total_cost', 0):.3f}")
+    console.print(f"Duration: {total_duration:.1f}s")
+
+    _save_final_report(final_state, user_spec_path, total_duration)
+
+    return final_state
 
 
 def _save_final_report(
@@ -70,26 +190,27 @@ def _save_final_report(
     duration_sec: float,
     results_dir: str = "work/mvp/results",
 ) -> None:
-    """
-    Save the pipeline final report to disk as JSON.
-    """
+    """Save pipeline report to disk."""
     verdicts = final_state.get("verdicts", [])
     last_verdict = verdicts[-1] if verdicts else None
 
-    task_dict = None
-    if "task" in final_state:
-        task = final_state["task"]
-        if hasattr(task, "get"):
-            task_dict = dict(task)
+    # Extract consistency from latest verdict if available
+    consistency = None
+    verifier_breakdown = None
+    if last_verdict:
+        consistency = last_verdict.get("consistency")
+        verifier_breakdown = last_verdict.get("verifier_breakdown")
 
     report = {
         "timestamp": datetime.now().isoformat(),
         "user_spec": user_spec_path,
-        "task": task_dict,
         "iterations": final_state.get("iteration", 0),
         "final_passed": last_verdict["passed"] if last_verdict else False,
+        "consistency_score": consistency,
+        "verifier_breakdown": verifier_breakdown,
         "verdicts": verdicts,
         "artifacts_count": len(final_state.get("artifacts", [])),
+        "completed_tasks": final_state.get("completed_tasks", []),
         "total_duration_sec": round(duration_sec, 2),
         "total_cost_usd": round(final_state.get("total_cost", 0), 3),
         "goodhart_proof": True,
@@ -101,7 +222,7 @@ def _save_final_report(
         json.dumps(report, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
-    console.print(f"[green]📄 Report saved: {out / '00_final_report.json'}[/]")
+    console.print(f"[green]Report saved: {out / '00_final_report.json'}[/]")
 
 
 async def run_pipeline_with_langgraph(
@@ -109,106 +230,22 @@ async def run_pipeline_with_langgraph(
     feature_name: str = "default",
     thread_id: str | None = None,
     checkpoint_db: str = "./data/checkpoints.db",
+    suppress_progress: bool = False,
 ) -> dict[str, Any]:
-    """
-    Run the pipeline through LangGraph with persistence.
-
-    Args:
-        user_spec_path: Path to `user-spec.md`
-        feature_name: Feature name
-        thread_id: Unique checkpointing ID (auto-generated if `None`)
-        checkpoint_db: Path to the SQLite persistence database
-    """
-    if thread_id is None:
-        thread_id = f"feature-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-
-    console.print(
-        Panel.fit(
-            f"[bold magenta]🚀 LANGGRAPH PIPELINE[/]\n"
-            f"[cyan]Thread: {thread_id}[/]\n"
-            f"[cyan]Spec: {user_spec_path}[/]",
-            border_style="magenta",
-        )
+    """Legacy wrapper for simple 3-node pipeline. Use run_pipeline for multi-layer."""
+    return await run_pipeline(
+        user_spec_path=user_spec_path,
+        feature_name=feature_name,
+        benchmark=False,
+        suppress_progress=suppress_progress,
     )
 
-    initial_state: GraphState = {
-        "user_spec_path": user_spec_path,
-        "feature_name": feature_name,
-        "thread_id": thread_id,
-        "iteration": 0,
-        "artifacts": [],
-        "verdicts": [],
-    }
-    config: RunnableConfig = {
-        "configurable": {
-            "thread_id": thread_id,
-        }
-    }
 
-    console.print("\n[bold]▶️  Invoking graph...[/]\n")
-
-    pipeline_start = time.time()
-
-    if AsyncSqliteSaver is not None:
-        Path(checkpoint_db).parent.mkdir(parents=True, exist_ok=True)
-        console.print(f"[dim]Using SQLite checkpoints: {checkpoint_db}[/]")
-        async with AsyncSqliteSaver.from_conn_string(checkpoint_db) as checkpointer:
-            graph = build_graph(checkpointer)
-            final_state = await graph.ainvoke(initial_state, config)
-            persistence_label = "SQLite"
-    else:
-        console.print(
-            "[yellow]⚠ langgraph.checkpoint.sqlite is not installed; using in-memory checkpoints[/]"
-        )
-        graph = build_graph(InMemorySaver())
-        final_state = await graph.ainvoke(initial_state, config)
-        persistence_label = "memory"
-
-    total_duration = time.time() - pipeline_start
-
-    console.print("\n" + "=" * 70)
-    console.print("[bold]📊 LANGGRAPH FINAL STATE[/]")
-    console.print("=" * 70)
-
-    console.print(f"Thread ID: {thread_id}")
-    console.print(f"Iterations: {final_state.get('iteration', 0)}")
-    console.print(f"Artifacts: {len(final_state.get('artifacts', []))}")
-    console.print(f"Verdicts: {len(final_state.get('verdicts', []))}")
-    console.print(f"Total cost: ${final_state.get('total_cost', 0):.3f}")
-
-    if final_state.get("verdicts"):
-        last_verdict = final_state["verdicts"][-1]
-        passed = last_verdict["passed"]
-        console.print(
-            f"\n[bold {'green' if passed else 'red'}]{'✅ PASS' if passed else '❌ FAIL'}[/]"
-        )
-        console.print(f"Final score: {last_verdict['score']:.2f}")
-
-    console.print(f"\n[bold]💾 Checkpoint saved to {persistence_label}[/]")
-    console.print(f"[dim]You can resume with thread_id={thread_id}[/]")
-
-    _save_final_report(final_state, user_spec_path, total_duration)
-
-    return final_state
-
-
-# ─── CLI Entry Point ────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    """CLI entry point: python -m graph.graph <path-to-spec>"""
     import sys
-
     from dotenv import load_dotenv
-
     load_dotenv()
 
-    user_spec = sys.argv[1] if len(sys.argv) > 1 else "work/mvp/user-spec.md"
-    thread_id = sys.argv[2] if len(sys.argv) > 2 else None
-
-    if not Path(user_spec).exists():
-        console.print(f"[red]❌ Spec not found: {user_spec}[/]")
-        sys.exit(1)
-
-    try:
-        asyncio.run(run_pipeline_with_langgraph(user_spec, thread_id=thread_id))
-    except KeyboardInterrupt:
-        console.print("\n[yellow]⚠️  Interrupted[/]")
-        sys.exit(130)
+    spec_path = sys.argv[1] if len(sys.argv) > 1 else "work/mvp/user-spec.md"
+    asyncio.run(run_pipeline(user_spec_path=spec_path))

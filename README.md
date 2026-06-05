@@ -28,7 +28,13 @@ When AI agents see tests and acceptance criteria, they inevitably optimize code 
 ```text
 PLANNING        →  TaskInput (NO criteria)
                    ↓
+CONTEXT ROUTER  →  Compressed context (budget allocation)
+                   ↓
+MODEL ROUTER    →  execution_config (tier selection)
+                   ↓
 EXECUTION       →  CodeArtifact (NO author info)
+                   ↓
+STATIC GATE     →  Lint check (skip LLM on syntax errors)
                    ↓
 VERIFICATION    →  Verdict (score + reason)
                    ↓
@@ -38,7 +44,10 @@ RETRY LOOP      →  Abstract Feedback (NO rubric revealed)
 | Layer | Input | 🚫 Restricted From |
 | :--- | :--- | :--- |
 | **Planning** | User spec, codebase | Execution results, verdicts |
+| **Context Router** | TaskInput | Rubric, acceptance criteria |
+| **Model Router** | TaskInput (deterministic + LLM) | Rubric, verdicts, task descriptions |
 | **Execution** | Task description | **Acceptance criteria, tests, rubrics** |
+| **Static Gate** | Code diff | Rubric, task prompt |
 | **Verification** | Git diff, rubric | **Worker ID, task description, author** |
 | **Optimization** | Aggregated metrics | Artifact contents, raw logs |
 
@@ -52,8 +61,9 @@ RETRY LOOP      →  Abstract Feedback (NO rubric revealed)
 
 ### Core Components
 - **LangGraph**: State machine with SQLite persistence and streaming.
-- **Ollama + Qwen2.5-Coder-3B**: Local execution layer (free, 10-14 tok/s).
-- **OpenRouter API**: Planning (Qwen-Max) and Verification (Qwen-Turbo).
+- **Model Router**: 10-tier routing (local_small → cloud_ollama → openrouter) with deterministic scoring + LLM-assisted provider chain.
+- **Ollama + Qwen3-coder-next (80B)**: Cloud execution layer. Local fallback: Qwen2.5-Coder-3B, CodeLlama-7B.
+- **OpenRouter API**: Planning (gpt-oss-120b:free) and Verification (gpt-oss-120b:free).
 - **Git Worktrees**: Isolated branches per worker (`agent/{task_id}-{id}`).
 - **Reconciler**: Kubernetes-style control loop for auto-recovery.
 
@@ -76,6 +86,17 @@ When verification fails, the system generates abstract guidance without revealin
 | **Total Cost** | **$0.030** | $0.40 – $10+ |
 | **Iterations** | 1 (Pass) | 2–4 (Avg) |
 | **Verification Score** | 0.97 / 1.0 | N/A (Opaque) |
+
+### Ablation: Goodhart-Proof Verification
+
+Run the ablation benchmark to compare **isolated** vs **non-isolated** verification:
+
+```bash
+source .env
+python -m benchmark.run_ablation
+```
+
+Results saved to `benchmark/results/ablation_report.json`.
 
 ## 🚀 Quick Start
 
@@ -117,16 +138,13 @@ SPEC
 
 **2. Run the pipeline:**
 ```bash
+source .env
 python -m graph.graph work/my-feature/user-spec.md
 ```
 
-**3. Review & Merge:**
+**3. View results:**
 ```bash
-# View generated branch
-git diff master...agent/task-001-<artifact_id>
-
-# Merge
-git merge agent/task-001-<artifact_id> --no-ff
+cat work/mvp/results/00_final_report.json
 ```
 
 ## 📁 Project Structure
@@ -135,16 +153,38 @@ git merge agent/task-001-<artifact_id> --no-ff
 developer-farm/
 ├── bootstrap.sh              # One-click setup
 ├── contracts.py              # TypedDict layer boundaries (Core Security)
+├── AGENTS.md                 # LangGraph code generation rules
 ├── graph/
 │   ├── graph.py              # StateGraph orchestration
 │   ├── nodes.py              # Layer wrappers
+│   ├── state.py              # GraphState TypedDict
 │   └── reconciler.py         # Auto-recovery loop
 ├── nodes/
-│   ├── planning.py           # Spec → Task (API)
-│   ├── execution.py          # Task → Code (Local Ollama)
-│   └── verification.py       # Code → Verdict (API)
+│   ├── planning.py           # Spec → Task (OpenRouter)
+│   ├── context_router.py     # Budget allocation & compression
+│   ├── execution.py          # Task → Code (Ollama, framework-aware)
+│   ├── verification.py       # Code → Verdict (OpenRouter)
+│   ├── verification_consensus.py  # Multi-model consensus verifier
+│   ├── confidence_router.py  # Pre/post-execution confidence routing
+│   ├── self_reflection.py    # Code flaw detection & fix
+│   └── static_gate.py        # Lint gate before LLM verification
 ├── utils/
-│   └── git_worktree.py       # Git isolation manager
+│   ├── model_router.py       # 10-tier deterministic model registry
+│   ├── model_router_llm.py   # LLM-assisted routing with provider chain
+│   ├── git_worktree.py       # Git isolation manager
+│   ├── context_compressor.py # Token budget enforcement
+│   ├── farm_config.py        # Repo path resolution
+│   ├── feedback_sanitizer.py # Abstract feedback (no rubric leak)
+│   ├── token_tracker.py      # Token budget tracking
+│   ├── output.py             # Rich console output
+│   ├── code_graph.py         # Neo4j code graph integration
+│   ├── brightdata_scraper.py # External docs fallback
+│   ├── optimization_analyzer.py  # Metrics aggregation
+│   └── proposal_manager.py   # HITL proposal workflow
+├── benchmark/
+│   ├── run_ablation.py       # Goodhart-proof ablation (isolated vs non-isolated)
+│   ├── results/              # Ablation report output
+│   └── tasks/                # Benchmark task definitions
 └── dashboard/                # Real-time monitoring UI
 ```
 
